@@ -6,6 +6,12 @@ vars:
   X64_TARGET: targets/uefi-x64.json
   AA64_TARGET: targets/uefi-aa64.json
 
+  # Path to a local checkout of go-coff/pec, used by the phase-3 smoke
+  # tests to append a `.linux` section. Override via the PEC env var to
+  # point at a different checkout (or use `go install` and drop the path
+  # by hand-editing the cmds).
+  PEC: ../pec
+
   # OVMF lookup. The first matching file wins; macOS / Homebrew QEMU and
   # Linux distros put OVMF in different places.
   OVMF_X64_CODE:
@@ -340,6 +346,164 @@ tasks:
         -net none ; true
       - grep -q 'Hello, UEFI from TinyGo!' qemu-iso-aa64.log && grep -q 'PHASE2-DONE' qemu-iso-aa64.log
 
+  # ----- phase-3 self-load smoke test -----
+  #
+  # Append our own BOOT{X64,AA64}.EFI as a `.linux` section to a copy of
+  # itself, then boot it. The outer instance walks its section table,
+  # finds `.linux`, and does LoadImage + StartImage on the embedded
+  # bytes. The inner instance runs as a fresh EFI app: it does NOT find
+  # a `.linux` section (the outer's payload was a no-payload binary) and
+  # prints "no .linux section, phase 3 skipped". A successful run shows
+  # the banner twice on the serial console.
+
+  uki-x64:
+    desc: "Phase 3: build BOOTX64.EFI and append it as .linux via pec → BOOTX64-uki.EFI."
+    deps: [build-x64]
+    sources: ["{{.X64_OUT}}"]
+    generates: [BOOTX64-uki.EFI]
+    cmds:
+      - >-
+        (cd {{.PEC}} && go run . --add-section .linux=$OLDPWD/{{.X64_OUT}}
+        -o $OLDPWD/BOOTX64-uki.EFI $OLDPWD/{{.X64_OUT}})
+      - file BOOTX64-uki.EFI
+
+  uki-aa64:
+    desc: "Phase 3: build BOOTAA64.EFI and append it as .linux via pec → BOOTAA64-uki.EFI."
+    deps: [build-aa64]
+    sources: ["{{.AA64_OUT}}"]
+    generates: [BOOTAA64-uki.EFI]
+    cmds:
+      - >-
+        (cd {{.PEC}} && go run . --add-section .linux=$OLDPWD/{{.AA64_OUT}}
+        -o $OLDPWD/BOOTAA64-uki.EFI $OLDPWD/{{.AA64_OUT}})
+      - file BOOTAA64-uki.EFI
+
+  uki-test-x64:
+    desc: "Phase 3: boot the UKI on qemu-system-x86_64 and assert the banner appears TWICE."
+    deps: [uki-x64]
+    cmds:
+      - mkdir -p esp-uki-x64/EFI/BOOT
+      - cp BOOTX64-uki.EFI esp-uki-x64/EFI/BOOT/BOOTX64.EFI
+      - cp {{.OVMF_X64_VARS_TEMPLATE}} ovmf-x64-vars.fd
+      - rm -f qemu-uki-x64.log
+      - >-
+        perl -e 'alarm 240; exec @ARGV'
+        qemu-system-x86_64
+        -machine q35
+        -m 256
+        -display none
+        -no-reboot
+        -serial file:qemu-uki-x64.log
+        -drive if=pflash,format=raw,readonly=on,file={{.OVMF_X64_CODE}}
+        -drive if=pflash,format=raw,file=ovmf-x64-vars.fd
+        -drive file=fat:rw:esp-uki-x64,format=raw
+        -net none ; true
+      # Outer + inner each emit a banner — assert both. Also verify the
+      # inner reached its "no .linux" branch, which proves StartImage
+      # actually transferred control.
+      - test "$(grep -c 'Hello, UEFI from TinyGo!' qemu-uki-x64.log)" = 2
+      - grep -q 'no .linux section, phase 3 skipped' qemu-uki-x64.log
+
+  uki-test-aa64:
+    desc: "Phase 3: boot the UKI on qemu-system-aarch64 and assert the banner appears TWICE."
+    deps: [uki-aa64]
+    cmds:
+      - mkdir -p esp-uki/EFI/BOOT
+      - cp BOOTAA64-uki.EFI esp-uki/EFI/BOOT/BOOTAA64.EFI
+      - cp {{.OVMF_AA64_VARS_TEMPLATE}} ovmf-aa64-vars.fd
+      - rm -f qemu-uki-aa64.log
+      - >-
+        perl -e 'alarm 240; exec @ARGV'
+        qemu-system-aarch64
+        -machine virt
+        -cpu max
+        -m 512
+        -display none
+        -no-reboot
+        -serial file:qemu-uki-aa64.log
+        -drive if=pflash,format=raw,readonly=on,file={{.OVMF_AA64_CODE}}
+        -drive if=pflash,format=raw,file=ovmf-aa64-vars.fd
+        -drive file=fat:rw:esp-uki,format=raw,id=hd0,if=none
+        -device virtio-blk-device,drive=hd0
+        -net none ; true
+      - test "$(grep -c 'Hello, UEFI from TinyGo!' qemu-uki-aa64.log)" = 2
+      - grep -q 'no .linux section, phase 3 skipped' qemu-uki-aa64.log
+
+  # ----- UKI discovery smoke (phase 3a) -----
+  #
+  # Complement to `uki-test-*` above: instead of testing the chain-load
+  # path (phase 3 = .linux), this verifies the section-discovery path
+  # (phase 3a = `.cmdline` / `.osrel` / `.uname` recognised and dumped).
+  # cmd/mkuki appends three fixed test sections to a freshly-linked stub
+  # via the local `pe` library; the boot then asserts that reportUKI
+  # found 3/5 sections.
+
+  uki3a-x64:
+    desc: "Phase 3a: BOOTX64.EFI + test .cmdline/.osrel/.uname → BOOTX64-uki3a.EFI."
+    deps: [build-x64]
+    sources: ["{{.X64_OUT}}", cmd/mkuki/main.go]
+    generates: [BOOTX64-uki3a.EFI]
+    cmds:
+      - go run ./cmd/mkuki BOOTX64-uki3a.EFI {{.X64_OUT}}
+
+  uki3a-aa64:
+    desc: "Phase 3a: BOOTAA64.EFI + test .cmdline/.osrel/.uname → BOOTAA64-uki3a.EFI."
+    deps: [build-aa64]
+    sources: ["{{.AA64_OUT}}", cmd/mkuki/main.go]
+    generates: [BOOTAA64-uki3a.EFI]
+    cmds:
+      - go run ./cmd/mkuki BOOTAA64-uki3a.EFI {{.AA64_OUT}}
+
+  uki3a-test-x64:
+    desc: "Phase 3a: boot BOOTX64-uki3a.EFI and assert 3/5 sections recognised."
+    deps: [uki3a-x64]
+    cmds:
+      - mkdir -p esp-uki3a-x64/EFI/BOOT
+      - cp BOOTX64-uki3a.EFI esp-uki3a-x64/EFI/BOOT/BOOTX64.EFI
+      - cp {{.OVMF_X64_VARS_TEMPLATE}} ovmf-x64-vars.fd
+      - rm -f qemu-uki3a-x64.log
+      - >-
+        perl -e 'alarm 180; exec @ARGV'
+        qemu-system-x86_64
+        -machine q35
+        -m 256
+        -display none
+        -no-reboot
+        -serial file:qemu-uki3a-x64.log
+        -drive if=pflash,format=raw,readonly=on,file={{.OVMF_X64_CODE}}
+        -drive if=pflash,format=raw,file=ovmf-x64-vars.fd
+        -drive file=fat:rw:esp-uki3a-x64,format=raw
+        -net none ; true
+      - grep -q 'PHASE3A-DONE' qemu-uki3a-x64.log
+      - "grep -q 'UKI payload sections found: 3/5' qemu-uki3a-x64.log"
+      - grep -q 'console=ttyS0 quiet rw' qemu-uki3a-x64.log
+
+  uki3a-test-aa64:
+    desc: "Phase 3a: boot BOOTAA64-uki3a.EFI and assert 3/5 sections recognised."
+    deps: [uki3a-aa64]
+    cmds:
+      - mkdir -p esp-uki3a-aa64/EFI/BOOT
+      - cp BOOTAA64-uki3a.EFI esp-uki3a-aa64/EFI/BOOT/BOOTAA64.EFI
+      - cp {{.OVMF_AA64_VARS_TEMPLATE}} ovmf-aa64-vars.fd
+      - rm -f qemu-uki3a-aa64.log
+      - >-
+        perl -e 'alarm 240; exec @ARGV'
+        qemu-system-aarch64
+        -machine virt
+        -cpu max
+        -m 512
+        -display none
+        -no-reboot
+        -serial file:qemu-uki3a-aa64.log
+        -drive if=pflash,format=raw,readonly=on,file={{.OVMF_AA64_CODE}}
+        -drive if=pflash,format=raw,file=ovmf-aa64-vars.fd
+        -drive file=fat:rw:esp-uki3a-aa64,format=raw,id=hd0,if=none
+        -device virtio-blk-device,drive=hd0
+        -net none ; true
+      - grep -q 'PHASE3A-DONE' qemu-uki3a-aa64.log
+      - "grep -q 'UKI payload sections found: 3/5' qemu-uki3a-aa64.log"
+      - grep -q 'console=ttyS0 quiet rw' qemu-uki3a-aa64.log
+
   # ----- aggregate -----
 
   build:
@@ -354,6 +518,14 @@ tasks:
     desc: Run the boot test on both architectures from the same ISO.
     deps: [qemu-iso-test-x64, qemu-iso-test-aa64]
 
+  uki-test:
+    desc: Run the phase-3 self-load smoke test on both architectures.
+    deps: [uki-test-x64, uki-test-aa64]
+
+  uki3a-test:
+    desc: Run the phase-3a UKI section discovery test on both architectures.
+    deps: [uki3a-test-x64, uki3a-test-aa64]
+
   clean:
     desc: Remove all build artefacts.
     cmds:
@@ -361,4 +533,8 @@ tasks:
           main-x64.o thunk-x64.o {{.X64_OUT}} esp-x64 ovmf-x64-vars.fd qemu-x64.log
           main-aa64.o thunk-aa64.o {{.AA64_OUT}} esp-aa64 ovmf-aa64-vars.fd qemu-aa64.log
           esp.img stub.iso qemu-iso-x64.log qemu-iso-aa64.log
+          BOOTX64-uki.EFI BOOTAA64-uki.EFI esp-uki esp-uki-x64
+          qemu-uki-x64.log qemu-uki-aa64.log
+          BOOTX64-uki3a.EFI BOOTAA64-uki3a.EFI esp-uki3a-x64 esp-uki3a-aa64
+          qemu-uki3a-x64.log qemu-uki3a-aa64.log
           .task

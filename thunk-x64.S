@@ -93,3 +93,28 @@ efiCall5:
     callq   *%rax
     addq    $0x28, %rsp
     retq
+
+    // efiCall6(fn, a, b, c, d, e, f) -> uint64
+    //
+    // Two of the seven args end up on the inner call's stack at
+    // [rsp+0x20] (e) and [rsp+0x28] (f). d and e are read from the
+    // caller frame into r10/r11 before adjusting RSP; f is read after
+    // the sub from its caller-frame position (orig +0x38 → new +0x70).
+    // Sub by 0x38 to keep the inner call site 16-byte aligned and to
+    // leave a 0x20 shadow plus two stack-passed-arg slots.
+    .globl efiCall6
+efiCall6:
+    movq    0x28(%rsp), %r10        // d (5th caller arg)
+    movq    0x30(%rsp), %r11        // e (6th caller arg)
+    subq    $0x38, %rsp             // 0x20 shadow + 0x10 args + 8 for align
+    movq    %rcx, %rax              // rax = fn
+    movq    %rdx, %rcx              // rcx = a
+    movq    %r8,  %rdx              // rdx = b
+    movq    %r9,  %r8               // r8  = c
+    movq    %r10, %r9               // r9  = d
+    movq    %r11, 0x20(%rsp)        // e at [rsp+0x20] (inner 5th arg slot)
+    movq    0x70(%rsp), %r10        // f, now at +0x70 in our frame after sub
+    movq    %r10, 0x28(%rsp)        // f at [rsp+0x28] (inner 6th arg slot)
+    callq   *%rax
+    addq    $0x38, %rsp
+    retq

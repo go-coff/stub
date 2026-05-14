@@ -82,6 +82,15 @@ type efiBootServices struct {
 	reinstallProtocolInterface uintptr // 0x88
 	uninstallProtocolInterface uintptr // 0x90
 	handleProtocol             uintptr // 0x98  ← phase-2 entry point
+	_reserved                  uintptr // 0xA0
+	registerProtocolNotify     uintptr // 0xA8
+	locateHandle               uintptr // 0xB0
+	locateDevicePath           uintptr // 0xB8
+	installConfigurationTable  uintptr // 0xC0
+
+	// Image Services.
+	loadImage  uintptr // 0xC8  ← phase-3 entry point
+	startImage uintptr // 0xD0
 	// Truncated past here; firmware fills the rest in but we never read
 	// it, so leaving the struct short is harmless.
 }
@@ -152,6 +161,9 @@ func efiCall4(fn, a, b, c, d uintptr) uint64
 //go:linkname efiCall5 efiCall5
 func efiCall5(fn, a, b, c, d, e uintptr) uint64
 
+//go:linkname efiCall6 efiCall6
+func efiCall6(fn, a, b, c, d, e, f uintptr) uint64
+
 // ----- Print helpers -----
 //
 // Everything goes through a single per-call scratch buffer in BSS. We
@@ -174,6 +186,39 @@ var loadedImageHolder uintptr
 // the moment `&nameBuf[0]` flows into an external thunk call, and that
 // path doesn't survive a freestanding `gc: leaking` build.
 var nameBuf [9]uint16
+
+// Phase 3 state. dotLinuxVA / dotLinuxSize are populated by walkSections
+// when it spots a `.linux` section; if both stay zero, we skip the kernel
+// handoff and just spin (the unloaded leaf case). childImageHandle is
+// the OUT slot LoadImage writes through — has to live in BSS for the
+// same reason as loadedImageHolder (trap #8).
+var (
+	dotLinuxVA       uint32
+	dotLinuxSize     uint32
+	childImageHandle uintptr
+)
+
+// ukiSection records where one of the named UKI payload sections lives
+// inside our loaded image. `vaddr` is relative to imageBase: the bytes
+// of the section are accessible at `imageBase + vaddr` for `vsize` bytes.
+type ukiSection struct {
+	vaddr uint32
+	vsize uint32
+	found bool
+}
+
+// The five UKI payload sections that systemd-stub recognises. Same names
+// the companion `pec` CLI uses when adding sections at build time. All
+// live in BSS — same escape-analysis rule as the other holders above:
+// once we capture an `&secCmdline` to read its body, the variable must
+// not be a function-local.
+var (
+	secLinux   ukiSection
+	secInitrd  ukiSection
+	secCmdline ukiSection
+	secOsrel   ukiSection
+	secUname   ukiSection
+)
 
 // writeUTF16 prints a NUL-terminated UTF-16LE buffer to ConOut.
 func writeUTF16(co *efiSimpleTextOutput, p *uint16) {
@@ -244,6 +289,36 @@ func peU16(base, off uintptr) uint16 {
 }
 
 // peU32 reads a little-endian uint32 at `base+off`.
+// peByte reads a single byte at `base+off`. Used to walk the body of an
+// ASCII UKI section without a slice (no allocation on a freestanding
+// build) and without bounds-checking overhead.
+func peByte(base, off uintptr) byte {
+	return *(*byte)(unsafe.Pointer(base + off))
+}
+
+// secNameIs returns true when the 8-byte PE section name at `entry`
+// matches `target` (≤ 8 chars, the rest of the field must be NUL-padded).
+// Comparing the raw bytes lets us avoid widening the section name into
+// nameBuf just for the match.
+func secNameIs(entry uintptr, target string) bool {
+	if len(target) > 8 {
+		return false
+	}
+	for i := 0; i < len(target); i++ {
+		if peByte(entry, uintptr(i)) != target[i] {
+			return false
+		}
+	}
+	// Anything past `target` in the 8-byte field must be NUL — otherwise
+	// e.g. ".linuxX" would match a target of ".linux".
+	for i := len(target); i < 8; i++ {
+		if peByte(entry, uintptr(i)) != 0 {
+			return false
+		}
+	}
+	return true
+}
+
 func peU32(base, off uintptr) uint32 {
 	return *(*uint32)(unsafe.Pointer(base + off))
 }
@@ -295,7 +370,116 @@ func walkSections(co *efiSimpleTextOutput, base uintptr) {
 		writeASCII(co, "  size=")
 		writeHex64(co, uint64(vsize))
 		writeASCII(co, "\r\n")
+
+		// Record `.linux` for the phase-3 kernel handoff. Match the
+		// 8-byte field in nameBuf rather than building a Go string —
+		// we have no allocator. Section names are short ASCII so an
+		// open-coded compare is cheaper than anything generic.
+		if nameBuf[0] == '.' && nameBuf[1] == 'l' && nameBuf[2] == 'i' &&
+			nameBuf[3] == 'n' && nameBuf[4] == 'u' && nameBuf[5] == 'x' &&
+			nameBuf[6] == 0 {
+			dotLinuxVA = vaddr
+			dotLinuxSize = vsize
+		}
+
+		// Capture every UKI payload section we recognise (phase 3a). The
+		// five names below are the systemd-stub PE annex contract — same
+		// names the companion `pec` CLI writes at build time. Done via
+		// `secNameIs` against the raw 8-byte name field, no allocation.
+		switch {
+		case secNameIs(s, ".linux"):
+			secLinux = ukiSection{vaddr, vsize, true}
+		case secNameIs(s, ".initrd"):
+			secInitrd = ukiSection{vaddr, vsize, true}
+		case secNameIs(s, ".cmdline"):
+			secCmdline = ukiSection{vaddr, vsize, true}
+		case secNameIs(s, ".osrel"):
+			secOsrel = ukiSection{vaddr, vsize, true}
+		case secNameIs(s, ".uname"):
+			secUname = ukiSection{vaddr, vsize, true}
+		}
 	}
+}
+
+// reportUKISection prints "<name>: <state>" for one of the five UKI
+// payload sections. The state is either "missing" or "va=… size=…".
+func reportUKISection(co *efiSimpleTextOutput, name string, s ukiSection) {
+	writeASCII(co, "    ")
+	writeASCII(co, name)
+	if !s.found {
+		writeASCII(co, ": missing\r\n")
+		return
+	}
+	writeASCII(co, ": va=")
+	writeHex64(co, uint64(s.vaddr))
+	writeASCII(co, " size=")
+	writeHex64(co, uint64(s.vsize))
+	writeASCII(co, "\r\n")
+}
+
+// dumpASCIISection prints up to lineBuf-4 wide chars of `s`'s body,
+// replacing control characters with '.' so a stray CR/LF inside `.osrel`
+// does not scramble the terminal. Stops at the first NUL.
+func dumpASCIISection(co *efiSimpleTextOutput, imageBase uintptr, s ukiSection) {
+	if !s.found || s.vsize == 0 {
+		return
+	}
+	max := uint32(len(lineBuf)) - 4 // room for `...` + trailing NUL
+	n := s.vsize
+	truncated := false
+	if n > max {
+		n = max
+		truncated = true
+	}
+	out := 0
+	for i := uint32(0); i < n; i++ {
+		c := peByte(imageBase, uintptr(s.vaddr)+uintptr(i))
+		if c == 0 {
+			break
+		}
+		if c < 0x20 || c == 0x7F {
+			c = '.'
+		}
+		lineBuf[out] = uint16(c)
+		out++
+	}
+	if truncated {
+		lineBuf[out] = '.'
+		lineBuf[out+1] = '.'
+		lineBuf[out+2] = '.'
+		out += 3
+	}
+	lineBuf[out] = 0
+	writeASCII(co, "      content: \"")
+	writeUTF16(co, &lineBuf[0])
+	writeASCII(co, "\"\r\n")
+}
+
+// reportUKI prints the presence/absence of each UKI payload section and
+// dumps the body of `.cmdline`, `.osrel`, `.uname` when present (those
+// three are short ASCII text in any real UKI). Run after walkSections
+// has populated the secXxx package-level vars.
+func reportUKI(co *efiSimpleTextOutput, imageBase uintptr) {
+	writeASCII(co, "  UKI sections:\r\n")
+	reportUKISection(co, ".linux  ", secLinux)
+	reportUKISection(co, ".initrd ", secInitrd)
+	reportUKISection(co, ".cmdline", secCmdline)
+	dumpASCIISection(co, imageBase, secCmdline)
+	reportUKISection(co, ".osrel  ", secOsrel)
+	dumpASCIISection(co, imageBase, secOsrel)
+	reportUKISection(co, ".uname  ", secUname)
+	dumpASCIISection(co, imageBase, secUname)
+
+	// Coarse health signal the boot test can grep for.
+	found := uint32(0)
+	for _, s := range [...]ukiSection{secLinux, secInitrd, secCmdline, secOsrel, secUname} {
+		if s.found {
+			found++
+		}
+	}
+	writeASCII(co, "  UKI payload sections found: ")
+	writeDec(co, found)
+	writeASCII(co, "/5\r\n")
 }
 
 // ----- entry point -----
@@ -336,6 +520,66 @@ func _start(imageHandle uintptr, st *efiSystemTable) efiStatus {
 	// Sentinel the test grep can lock onto.
 	writeASCII(co, "PHASE2-DONE\r\n")
 
+	// ----- Phase 3a — UKI section discovery -----
+	//
+	// walkSections has captured any `.linux` / `.initrd` / `.cmdline` /
+	// `.osrel` / `.uname` section into the secXxx package-level vars.
+	// reportUKI prints the presence table and dumps the body of the
+	// short ASCII sections.
+	writeASCII(co, "Phase 3a - UKI section discovery\r\n")
+	reportUKI(co, lip.imageBase)
+	writeASCII(co, "PHASE3A-DONE\r\n")
+
+	// ----- Phase 3 (chain-load) -----
+	//
+	// If the section walk found a `.linux` payload, treat it as an
+	// embedded EFI image and chain-load it via BootServices.LoadImage +
+	// StartImage. On aarch64 the Linux kernel vmlinuz already IS a
+	// PE32+ EFI application (the EFISTUB), so this is the complete
+	// handoff — the kernel takes over from here, does its own
+	// ExitBootServices, and we never come back. On x86_64 the same
+	// path works for any EFI app appended as `.linux`; chain-loading a
+	// raw bzImage instead would need the boot-protocol handover entry
+	// point, which is left for a later iteration.
+	if dotLinuxVA == 0 {
+		writeASCII(co, "no .linux section, phase 3 skipped\r\n")
+		for {
+		}
+	}
+
+	writeASCII(co, "Phase 3 - kernel handoff\r\n")
+	writeASCII(co, "  .linux va=")
+	writeHex64(co, uint64(dotLinuxVA))
+	writeASCII(co, "  size=")
+	writeHex64(co, uint64(dotLinuxSize))
+	writeASCII(co, "\r\n")
+
+	status = efiCall6(bs.loadImage,
+		0,                                    // BootPolicy = FALSE: the SourceBuffer holds the image
+		imageHandle,                          // ParentImageHandle
+		0,                                    // DevicePath = NULL
+		lip.imageBase+uintptr(dotLinuxVA),    // SourceBuffer
+		uintptr(dotLinuxSize),                // SourceSize
+		uintptr(unsafe.Pointer(&childImageHandle)),
+	)
+	if status != efiSuccess {
+		writeASCII(co, "LoadImage failed: ")
+		writeHex64(co, status)
+		writeASCII(co, "\r\nPHASE3-FAIL\r\n")
+		for {
+		}
+	}
+	writeASCII(co, "  child image handle = ")
+	writeHex64(co, uint64(childImageHandle))
+	writeASCII(co, "\r\nStartImage...\r\n")
+
+	// StartImage transfers control. On the happy path it does not return.
+	// On failure (a kernel that exits without ExitBootServices, or any
+	// other error) we land back here and surface the status.
+	status = efiCall3(bs.startImage, childImageHandle, 0, 0)
+	writeASCII(co, "StartImage returned: ")
+	writeHex64(co, status)
+	writeASCII(co, "\r\nPHASE3-RETURNED\r\n")
 	for {
 	}
 }

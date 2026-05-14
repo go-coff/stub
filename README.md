@@ -9,10 +9,14 @@ anyone assembling a UKI: pair this stub with
 [`go-coff/pec`](https://github.com/go-coff/pec) and the whole pipeline
 runs without `binutils` and without `systemd-stub`.
 
-> **Status:** phase 2 — boots under OVMF (x86_64 and aarch64), prints
-> a banner via `SimpleTextOutput`, then locates its own PE image at
-> runtime via `EFI_LOADED_IMAGE_PROTOCOL` and walks the embedded
-> section table. Kernel handoff lands in phase 3.
+> **Status:** phase 3 (basic) — boots under OVMF on x86_64 and aarch64,
+> prints a banner via `SimpleTextOutput`, walks its own PE section
+> table via `EFI_LOADED_IMAGE_PROTOCOL`, and if a `.linux` section is
+> present chain-loads it via `BootServices.LoadImage` +
+> `BootServices.StartImage`. On aarch64 that's the full UKI handoff
+> (vmlinuz is itself a PE32+ EFI app); on x86_64 it works for any
+> embedded EFI app but a raw bzImage still needs the boot-protocol
+> handover entry point — left for a follow-up.
 
 ## Why TinyGo and not Go
 
@@ -46,6 +50,16 @@ task iso             # → stub.iso (also esp.img, the embedded FAT image)
 task qemu-iso-x64    # boot stub.iso under qemu-system-x86_64
 task qemu-iso-aa64   # boot stub.iso under qemu-system-aarch64
 task qemu-iso-test   # qemu-iso-test-x64 + qemu-iso-test-aa64
+
+# Phase-3 self-load smoke test (appends BOOT*.EFI as its own .linux,
+# then boots the result; the outer chain-loads the inner via LoadImage
+# / StartImage and the inner reports "no .linux, skipping"). Requires
+# a sibling checkout of github.com/go-coff/pec at ../pec.
+task uki-x64         # → BOOTX64-uki.EFI
+task uki-aa64        # → BOOTAA64-uki.EFI
+task uki-test-x64    # boot BOOTX64-uki.EFI, assert banner appears 2×
+task uki-test-aa64   # boot BOOTAA64-uki.EFI, assert banner appears 2×
+task uki-test        # uki-test-x64 + uki-test-aa64
 
 task clean
 ```
@@ -212,9 +226,22 @@ stub/
   us), walk the COFF header and print every section's name, VA and
   size. Any payload a `pec --add-section` build-time pass injects
   shows up here verbatim. Works on both archs.
-- **Phase 3** — install `EFI_LOAD_FILE2_PROTOCOL` on a vendor-media
-  device path so the kernel picks up the initrd, jump into the kernel
-  via the EFI handover protocol.
+- **Phase 3 (basic)** ✅ — if a `.linux` section is present, chain-load
+  it via `BootServices.LoadImage` + `StartImage`. On aarch64 this is
+  the **full UKI handoff** because vmlinuz is itself a PE32+ EFI app —
+  drop in a real `.linux=vmlinuz` and the kernel boots. On x86_64 the
+  same path works for any EFI app appended as `.linux`. Smoke-tested
+  via `task uki-test-{x64,aa64}` which appends our own `BOOT*.EFI` to
+  a copy of itself, boots, and asserts the banner appears **twice**
+  (outer + inner) — see the recipe in [Taskfile.yaml](Taskfile.yaml).
+- **Phase 3 (rest)** — for a real raw bzImage on x86_64, parse the
+  real-mode setup header and jump to `handover_offset` instead of
+  using `LoadImage`. For the initrd, install
+  `EFI_LOAD_FILE2_PROTOCOL` on a vendor-media device path with the
+  Linux initrd GUID so the kernel finds it via `LocateDevicePath`.
+  Forward `.cmdline` to the child by writing it into
+  `EFI_LOADED_IMAGE.LoadOptions` on the handle returned by
+  `LoadImage`.
 - **riscv64** — duplicate the recipe one more time with the
   `riscv64-pc-windows-gnu` triple and a thunk in the RISC-V ABI
   (`a0..a7` arg registers, `ra` link register).

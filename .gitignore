@@ -22,3 +22,19 @@
 /stub.iso
 /qemu-iso-x64.log
 /qemu-iso-aa64.log
+
+# Phase-3 self-load smoke test artefacts.
+/BOOTX64-uki.EFI
+/BOOTAA64-uki.EFI
+/esp-uki/
+/esp-uki-x64/
+/qemu-uki-x64.log
+/qemu-uki-aa64.log
+
+# Phase-3a UKI section-discovery smoke test artefacts.
+/BOOTX64-uki3a.EFI
+/BOOTAA64-uki3a.EFI
+/esp-uki3a-x64/
+/esp-uki3a-aa64/
+/qemu-uki3a-x64.log
+/qemu-uki3a-aa64.log
