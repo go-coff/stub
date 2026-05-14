@@ -1,0 +1,8 @@
+.DS_Store
+/.task/
+/main.o
+/thunk.o
+/BOOTX64.EFI
+/esp/
+/ovmf-vars.fd
+/qemu.log

@@ -1,0 +1,127 @@
+version: '3'
+
+vars:
+  OUT:        BOOTX64.EFI
+  TARGET:     targets/uefi-x64.json
+  ESP:        esp
+  OVMF_CODE:
+    # Where Homebrew QEMU ships the x86_64 OVMF code volume; Linux distros
+    # usually put it in /usr/share/OVMF/ or /usr/share/edk2-ovmf/x64/.
+    sh: |
+      for p in /opt/homebrew/Cellar/qemu/*/share/qemu/edk2-x86_64-code.fd \
+               /usr/share/OVMF/OVMF_CODE.fd \
+               /usr/share/edk2-ovmf/x64/OVMF_CODE.fd \
+               /usr/share/edk2/x64/OVMF_CODE.fd ; do
+        [ -f "$p" ] && echo "$p" && exit 0
+      done
+  OVMF_VARS_TEMPLATE:
+    # Same logic; the i386 vars file is the canonical "fresh" NVRAM for
+    # OVMF (vars layout is independent of the code volume).
+    sh: |
+      for p in /opt/homebrew/Cellar/qemu/*/share/qemu/edk2-i386-vars.fd \
+               /usr/share/OVMF/OVMF_VARS.fd \
+               /usr/share/edk2-ovmf/x64/OVMF_VARS.fd \
+               /usr/share/edk2/x64/OVMF_VARS.fd ; do
+        [ -f "$p" ] && echo "$p" && exit 0
+      done
+
+tasks:
+  default:
+    desc: List available tasks.
+    cmds:
+      - task --list-all
+    silent: true
+
+  thunk:
+    desc: Assemble thunk.S into a COFF amd64 object.
+    sources: [thunk.S]
+    generates: [thunk.o]
+    cmds:
+      - clang -target x86_64-pc-windows-gnu -c thunk.S -o thunk.o
+
+  compile:
+    desc: Compile the Go side to a COFF object via TinyGo.
+    deps: [thunk]
+    sources: [main.go, "{{.TARGET}}"]
+    generates: [main.o]
+    cmds:
+      - tinygo build -target={{.TARGET}} -o main.o .
+
+  link:
+    desc: Link main.o + thunk.o into a PE32+ EFI application.
+    deps: [compile]
+    sources: [main.o, thunk.o]
+    generates: ["{{.OUT}}"]
+    cmds:
+      # `/base:0x10000` keeps every absolute address inside 32 bits so the
+      # default LLVM "small" code model (32-bit `mov $abs, %r8d`) works.
+      # `/force:unresolved` lets the link succeed despite the dead-code
+      # references to VirtualAlloc / exit / SystemFunction036 that TinyGo's
+      # Windows runtime drags in via mainCRTStartup — none of them are
+      # reachable from `_start`, so they never execute.
+      - >-
+        lld-link
+        /subsystem:efi_application
+        /entry:_start
+        /nodefaultlib
+        /force:unresolved
+        /base:0x10000
+        /out:{{.OUT}}
+        main.o thunk.o
+
+  build:
+    desc: Build the EFI application end-to-end.
+    deps: [link]
+    cmds:
+      - file {{.OUT}}
+
+  esp:
+    desc: Stage BOOTX64.EFI into a synthetic ESP layout under {{.ESP}}/.
+    deps: [build]
+    sources: ["{{.OUT}}"]
+    generates: ["{{.ESP}}/EFI/BOOT/BOOTX64.EFI"]
+    cmds:
+      - mkdir -p {{.ESP}}/EFI/BOOT
+      - cp {{.OUT}} {{.ESP}}/EFI/BOOT/BOOTX64.EFI
+
+  qemu:
+    desc: Boot the stub under QEMU + OVMF (Ctrl-A x to quit).
+    deps: [esp]
+    cmds:
+      - cp {{.OVMF_VARS_TEMPLATE}} ovmf-vars.fd
+      - >-
+        qemu-system-x86_64
+        -machine q35
+        -m 256
+        -display none
+        -no-reboot
+        -serial mon:stdio
+        -drive if=pflash,format=raw,readonly=on,file={{.OVMF_CODE}}
+        -drive if=pflash,format=raw,file=ovmf-vars.fd
+        -drive file=fat:rw:{{.ESP}},format=raw
+        -net none
+
+  qemu-test:
+    desc: Boot under QEMU for a few seconds and assert the banner reached the serial console.
+    deps: [esp]
+    cmds:
+      - cp {{.OVMF_VARS_TEMPLATE}} ovmf-vars.fd
+      - rm -f qemu.log
+      - >-
+        perl -e 'alarm 120; exec @ARGV'
+        qemu-system-x86_64
+        -machine q35
+        -m 256
+        -display none
+        -no-reboot
+        -serial file:qemu.log
+        -drive if=pflash,format=raw,readonly=on,file={{.OVMF_CODE}}
+        -drive if=pflash,format=raw,file=ovmf-vars.fd
+        -drive file=fat:rw:{{.ESP}},format=raw
+        -net none ; true
+      - grep -q 'Hello, UEFI from TinyGo!' qemu.log
+
+  clean:
+    desc: Remove build artefacts.
+    cmds:
+      - rm -rf main.o thunk.o {{.OUT}} {{.ESP}} ovmf-vars.fd qemu.log
