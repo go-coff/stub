@@ -20,6 +20,5 @@
 # Multi-arch ISO artefacts.
 /esp.img
 /stub.iso
-/iso-root/
 /qemu-iso-x64.log
 /qemu-iso-aa64.log

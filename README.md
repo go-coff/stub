@@ -9,9 +9,10 @@ anyone assembling a UKI: pair this stub with
 [`go-coff/pec`](https://github.com/go-coff/pec) and the whole pipeline
 runs without `binutils` and without `systemd-stub`.
 
-> **Status:** phase 1 — boots under OVMF (x86_64 and aarch64), prints
-> a banner via `SimpleTextOutput`, then spins. Self-PE inspection and
-> the kernel handoff land in phase 2 and 3.
+> **Status:** phase 2 — boots under OVMF (x86_64 and aarch64), prints
+> a banner via `SimpleTextOutput`, then locates its own PE image at
+> runtime via `EFI_LOADED_IMAGE_PROTOCOL` and walks the embedded
+> section table. Kernel handoff lands in phase 3.
 
 ## Why TinyGo and not Go
 
@@ -58,8 +59,11 @@ boots on either platform. The image is hybrid: it works as a CD/DVD
 partition appended after the ISO 9660 area), or as a virtual disk in
 QEMU.
 
-Build-time dependencies for the ISO route: `mtools` (FAT image
-authoring without root) and `xorriso` (hybrid GPT ISO).
+The ISO build is pure-Go: [`cmd/mkesp`](cmd/mkesp/main.go) writes a
+FAT16 image with the standard library alone (no `mtools`) and
+[`cmd/mkiso`](cmd/mkiso/main.go) writes the ISO 9660 + El Torito UEFI
+boot record via `github.com/diskfs/go-diskfs` (no `xorriso`). Both
+run under plain `go run` from the Taskfile.
 
 Dependencies on the host:
 
@@ -72,12 +76,12 @@ Dependencies on the host:
   qemu-efi-aarch64`). On Apple Silicon hosts, `qemu-system-aarch64`
   uses HVF and runs near-native; `qemu-system-x86_64` falls back to
   TCG and is noticeably slower.
-- **mtools** + **xorriso** (only needed if you want to produce
-  `stub.iso`; `brew install mtools xorriso`, Debian / Ubuntu
-  `apt install mtools xorriso`).
 - **clang** (already in Xcode CLT on macOS; `clang` package on Linux)
+- **Go** ≥ 1.25 to run `cmd/mkesp` and `cmd/mkiso`. The TinyGo
+  installation already ships a recent Go, but a separate `go` on
+  $PATH is what the Taskfile invokes.
 
-## The seven traps we hit (and how to dodge them)
+## The eight traps we hit (and how to dodge them)
 
 This stub looks small but every line of the toolchain configuration was
 paid for in a debugging session. Documented here so the next person
@@ -144,8 +148,9 @@ in El Torito to extend ESP to end-of-medium"* — and OVMF then refused
 to mount it (no `FS0` filesystem alias appeared). The El Torito boot
 catalog's `Sector Count` field is a 16-bit value of 512-byte sectors,
 so anything above 32 MiB overflows; the firmware sees a malformed
-entry. **Pick a FAT image strictly below 32 MiB** (we use 4 MiB, large
-enough that mformat picks FAT16, small enough to fit the sector count).
+entry. **Pick a FAT image strictly below 32 MiB** (we use 4 MiB,
+inside the FAT16 cluster-count window and small enough to fit the
+El Torito sector count).
 
 ### 7. Image base above 4 GB defeats the small code model
 
@@ -155,6 +160,24 @@ as 32-bit immediates (`mov $abs, %r8d` zero-extends to 64 bits).
 0x140003000 doesn't fit in 32 bits, and a `.reloc` entry can't make it
 fit either. **Pass `/base:0x10000`** to keep every absolute address
 under 4 GB and the encoding becomes valid.
+
+### 8. Local `var x; &x` silently heap-allocates → crash
+
+The biggest gotcha of `gc: leaking` on a freestanding target. TinyGo's
+escape analysis sees `&x` flow into an external thunk call (because
+the firmware function might keep the pointer), conservatively decides
+that `x` must outlive the stack frame, and emits a `runtime.alloc(N)`.
+On a freestanding build there is **no heap** — `runtime.alloc` either
+crashes outright or returns garbage. Phase 2's first attempt died this
+way: a local `var lipPtr uintptr` whose `&lipPtr` was passed to
+`HandleProtocol` ended up pointing at random memory; the firmware
+dutifully wrote the LoadedImage pointer there and we then dereferenced
+garbage as a struct.
+
+**Discipline: any address that has to flow into a firmware call is
+a package-level variable (BSS)**. See `loadedImageHolder`, `nameBuf`,
+`lineBuf` in [`main.go`](main.go). Same rule for slices that get their
+backing array's pointer taken — pre-allocate in BSS.
 
 ## Layout
 
@@ -181,9 +204,11 @@ stub/
 
 - **Phase 1** ✅ — print banner via `ConOut->OutputString`, spin.
   Works on both x86_64 and aarch64.
-- **Phase 2** — locate our own PE image at runtime via
-  `EFI_LOADED_IMAGE_PROTOCOL`, parse the embedded section table, look
-  up `.linux` / `.initrd` / `.cmdline`.
+- **Phase 2** ✅ — locate our own PE image at runtime via
+  `EFI_LOADED_IMAGE_PROTOCOL` (the firmware tells us where it loaded
+  us), walk the COFF header and print every section's name, VA and
+  size. Any payload a `pec --add-section` build-time pass injects
+  shows up here verbatim. Works on both archs.
 - **Phase 3** — install `EFI_LOAD_FILE2_PROTOCOL` on a vendor-media
   device path so the kernel picks up the initrd, jump into the kernel
   via the EFI handover protocol.

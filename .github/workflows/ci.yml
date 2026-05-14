@@ -69,14 +69,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install host tools (clang, lld, qemu, ovmf, mtools, xorriso, task)
+      - name: Install host tools (clang, lld, qemu, ovmf, task)
+        # No mtools / xorriso: the ESP and ISO are now produced by the
+        # pure-Go cmd/mkesp + cmd/mkiso tools shipped in this repo.
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             clang lld \
             qemu-system-x86 qemu-system-arm \
             ovmf qemu-efi-aarch64 \
-            mtools xorriso \
             curl ca-certificates
           curl -sSL https://taskfile.dev/install.sh | sudo sh -s -- -d -b /usr/local/bin
 
@@ -89,12 +90,12 @@ jobs:
       - name: Build the multi-arch ISO
         run: task iso
 
-      - name: Verify the ISO has both BOOTX64.EFI and BOOTAA64.EFI inside its ESP
+      - name: Verify stub.iso is a bootable ISO 9660 image
+        # Structural check only — the boot tests in the next two steps
+        # actually run the binaries, so we don't bother re-implementing
+        # an mtools-style content listing here.
         run: |
           file stub.iso | tee /dev/stderr | grep -q 'ISO 9660'
-          mdir -i esp.img ::/EFI/BOOT | tee /dev/stderr
-          mdir -i esp.img ::/EFI/BOOT | grep -q 'BOOTX64  EFI'
-          mdir -i esp.img ::/EFI/BOOT | grep -q 'BOOTAA64 EFI'
 
       - name: Boot the ISO on qemu-system-x86_64 and assert the banner
         run: task qemu-iso-test-x64

@@ -135,7 +135,7 @@ tasks:
         -drive if=pflash,format=raw,file=ovmf-x64-vars.fd
         -drive file=fat:rw:esp-x64,format=raw
         -net none ; true
-      - grep -q 'Hello, UEFI from TinyGo!' qemu-x64.log
+      - grep -q 'Hello, UEFI from TinyGo!' qemu-x64.log && grep -q 'PHASE2-DONE' qemu-x64.log
 
   # ----- aarch64 -----
 
@@ -228,58 +228,34 @@ tasks:
         -drive file=fat:rw:esp-aa64,format=raw,id=hd0,if=none
         -device virtio-blk-device,drive=hd0
         -net none ; true
-      - grep -q 'Hello, UEFI from TinyGo!' qemu-aa64.log
+      - grep -q 'Hello, UEFI from TinyGo!' qemu-aa64.log && grep -q 'PHASE2-DONE' qemu-aa64.log
 
   # ----- multi-arch ISO -----
 
   esp-img:
-    desc: Build a single FAT16 image holding both BOOTX64.EFI and BOOTAA64.EFI.
+    desc: Build a 4 MiB FAT16 ESP holding both BOOTX64.EFI and BOOTAA64.EFI.
     deps: [build-x64, build-aa64]
-    sources: ["{{.X64_OUT}}", "{{.AA64_OUT}}"]
+    sources: ["{{.X64_OUT}}", "{{.AA64_OUT}}", cmd/mkesp/main.go]
     generates: [esp.img]
     cmds:
-      # 4 MiB FAT16 image. We need each side of the bargain:
-      #   * Big enough that mformat picks FAT16 (FAT12 also works under 16 MiB
-      #     but is less robust) and that firmware does not reject an
-      #     undersized ESP.
-      #   * Small enough that the El Torito boot record can encode its
-      #     "Sector Count" field — a 16-bit value of 512-byte sectors, so a
-      #     32 MiB image overflows it and xorriso falls back to writing 0
-      #     ("load until end of medium"), which OVMF in particular refuses.
-      - "dd if=/dev/zero of=esp.img bs=1M count=4 status=none"
-      - "mformat -i esp.img ::"
-      - "mmd -i esp.img ::/EFI"
-      - "mmd -i esp.img ::/EFI/BOOT"
-      - "mcopy -i esp.img {{.X64_OUT}}  ::/EFI/BOOT/BOOTX64.EFI"
-      - "mcopy -i esp.img {{.AA64_OUT}} ::/EFI/BOOT/BOOTAA64.EFI"
+      # cmd/mkesp is a ~200-line Go program that writes a FAT16 image
+      # directly. Pure stdlib. Replaces dd + mformat + mmd + mcopy.
+      # The image is 4 MiB: big enough for FAT16, small enough that El
+      # Torito's 16-bit "Sector Count" field can describe it.
+      - go run ./cmd/mkesp esp.img {{.X64_OUT}} {{.AA64_OUT}}
 
   iso:
-    desc: Build a hybrid GPT ISO that boots on x86_64 AND aarch64 UEFI firmware.
+    desc: Build a multi-arch bootable ISO from BOOTX64.EFI + BOOTAA64.EFI.
     deps: [esp-img]
-    sources: [esp.img]
+    sources: [esp.img, cmd/mkiso/main.go]
     generates: [stub.iso]
     cmds:
-      # We expose the same FAT image twice:
-      #   (1) inside the ISO 9660 tree at /boot/efi.img — referenced by the
-      #       El Torito UEFI boot record (the path firmware uses on a CD/DVD);
-      #   (2) appended after the ISO as GPT partition 2 with type 0xEF —
-      #       the path firmware uses when the image is written to a USB stick
-      #       or a real block device.
-      # Both views see the same /EFI/BOOT/BOOTX64.EFI + /EFI/BOOT/BOOTAA64.EFI
-      # inside the FAT, so x86_64 and aarch64 firmware each find their file.
-      - mkdir -p iso-root/boot
-      - cp esp.img iso-root/boot/efi.img
-      - >-
-        xorriso -as mkisofs
-        -V GOCOFFSTUB
-        -o stub.iso
-        -eltorito-alt-boot
-        -e boot/efi.img
-        -no-emul-boot
-        -isohybrid-gpt-basdat
-        -append_partition 2 0xef esp.img
-        -appended_part_as_gpt
-        iso-root
+      # cmd/mkiso wraps github.com/diskfs/go-diskfs: ISO 9660 + Rock Ridge
+      # + an El Torito UEFI boot record pointing at /boot/efi.img inside
+      # the ISO. Replaces xorriso. The FAT image inside the ISO carries
+      # both /EFI/BOOT/BOOTX64.EFI and /EFI/BOOT/BOOTAA64.EFI, so x86_64
+      # firmware picks the first, aarch64 firmware picks the second.
+      - go run ./cmd/mkiso stub.iso esp.img {{.X64_OUT}} {{.AA64_OUT}}
 
   qemu-iso-x64:
     desc: Boot the multi-arch ISO under qemu-system-x86_64 (CD-ROM / El Torito).
@@ -340,7 +316,7 @@ tasks:
         -cdrom stub.iso
         -boot d
         -net none ; true
-      - grep -q 'Hello, UEFI from TinyGo!' qemu-iso-x64.log
+      - grep -q 'Hello, UEFI from TinyGo!' qemu-iso-x64.log && grep -q 'PHASE2-DONE' qemu-iso-x64.log
 
   qemu-iso-test-aa64:
     desc: Boot the multi-arch ISO on qemu-system-aarch64 and assert the banner.
@@ -362,7 +338,7 @@ tasks:
         -drive file=stub.iso,format=raw,id=cd0,if=none,media=cdrom
         -device virtio-blk-device,drive=cd0
         -net none ; true
-      - grep -q 'Hello, UEFI from TinyGo!' qemu-iso-aa64.log
+      - grep -q 'Hello, UEFI from TinyGo!' qemu-iso-aa64.log && grep -q 'PHASE2-DONE' qemu-iso-aa64.log
 
   # ----- aggregate -----
 
@@ -384,5 +360,5 @@ tasks:
       - rm -rf
           main-x64.o thunk-x64.o {{.X64_OUT}} esp-x64 ovmf-x64-vars.fd qemu-x64.log
           main-aa64.o thunk-aa64.o {{.AA64_OUT}} esp-aa64 ovmf-aa64-vars.fd qemu-aa64.log
-          esp.img stub.iso iso-root qemu-iso-x64.log qemu-iso-aa64.log
+          esp.img stub.iso qemu-iso-x64.log qemu-iso-aa64.log
           .task
