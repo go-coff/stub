@@ -1,8 +1,18 @@
 .DS_Store
 /.task/
-/main.o
-/thunk.o
+
+# Build artefacts per arch (x86_64).
+/main-x64.o
+/thunk-x64.o
 /BOOTX64.EFI
-/esp/
-/ovmf-vars.fd
-/qemu.log
+/esp-x64/
+/ovmf-x64-vars.fd
+/qemu-x64.log
+
+# Build artefacts per arch (aarch64).
+/main-aa64.o
+/thunk-aa64.o
+/BOOTAA64.EFI
+/esp-aa64/
+/ovmf-aa64-vars.fd
+/qemu-aa64.log

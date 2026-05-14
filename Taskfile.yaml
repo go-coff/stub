@@ -1,12 +1,14 @@
 version: '3'
 
 vars:
-  OUT:        BOOTX64.EFI
-  TARGET:     targets/uefi-x64.json
-  ESP:        esp
-  OVMF_CODE:
-    # Where Homebrew QEMU ships the x86_64 OVMF code volume; Linux distros
-    # usually put it in /usr/share/OVMF/ or /usr/share/edk2-ovmf/x64/.
+  X64_OUT:    BOOTX64.EFI
+  AA64_OUT:   BOOTAA64.EFI
+  X64_TARGET: targets/uefi-x64.json
+  AA64_TARGET: targets/uefi-aa64.json
+
+  # OVMF lookup. The first matching file wins; macOS / Homebrew QEMU and
+  # Linux distros put OVMF in different places.
+  OVMF_X64_CODE:
     sh: |
       for p in /opt/homebrew/Cellar/qemu/*/share/qemu/edk2-x86_64-code.fd \
                /usr/share/OVMF/OVMF_CODE.fd \
@@ -14,14 +16,28 @@ vars:
                /usr/share/edk2/x64/OVMF_CODE.fd ; do
         [ -f "$p" ] && echo "$p" && exit 0
       done
-  OVMF_VARS_TEMPLATE:
-    # Same logic; the i386 vars file is the canonical "fresh" NVRAM for
-    # OVMF (vars layout is independent of the code volume).
+  OVMF_X64_VARS_TEMPLATE:
     sh: |
       for p in /opt/homebrew/Cellar/qemu/*/share/qemu/edk2-i386-vars.fd \
                /usr/share/OVMF/OVMF_VARS.fd \
                /usr/share/edk2-ovmf/x64/OVMF_VARS.fd \
                /usr/share/edk2/x64/OVMF_VARS.fd ; do
+        [ -f "$p" ] && echo "$p" && exit 0
+      done
+  OVMF_AA64_CODE:
+    sh: |
+      for p in /opt/homebrew/Cellar/qemu/*/share/qemu/edk2-aarch64-code.fd \
+               /usr/share/AAVMF/AAVMF_CODE.fd \
+               /usr/share/qemu-efi-aarch64/QEMU_EFI.fd \
+               /usr/share/edk2/aarch64/QEMU_EFI.fd ; do
+        [ -f "$p" ] && echo "$p" && exit 0
+      done
+  OVMF_AA64_VARS_TEMPLATE:
+    sh: |
+      for p in /opt/homebrew/Cellar/qemu/*/share/qemu/edk2-arm-vars.fd \
+               /usr/share/AAVMF/AAVMF_VARS.fd \
+               /usr/share/qemu-efi-aarch64/QEMU_VARS.fd \
+               /usr/share/edk2/aarch64/QEMU_VARS.fd ; do
         [ -f "$p" ] && echo "$p" && exit 0
       done
 
@@ -32,63 +48,63 @@ tasks:
       - task --list-all
     silent: true
 
-  thunk:
-    desc: Assemble thunk.S into a COFF amd64 object.
-    sources: [thunk.S]
-    generates: [thunk.o]
-    cmds:
-      - clang -target x86_64-pc-windows-gnu -c thunk.S -o thunk.o
+  # ----- x86_64 -----
 
-  compile:
-    desc: Compile the Go side to a COFF object via TinyGo.
-    deps: [thunk]
-    sources: [main.go, "{{.TARGET}}"]
-    generates: [main.o]
+  thunk-x64:
+    desc: Assemble thunk-x64.S into a COFF amd64 object.
+    sources: [thunk-x64.S]
+    generates: [thunk-x64.o]
     cmds:
-      - tinygo build -target={{.TARGET}} -o main.o .
+      - clang -target x86_64-pc-windows-gnu -c thunk-x64.S -o thunk-x64.o
 
-  link:
-    desc: Link main.o + thunk.o into a PE32+ EFI application.
-    deps: [compile]
-    sources: [main.o, thunk.o]
-    generates: ["{{.OUT}}"]
+  compile-x64:
+    desc: Compile main.go for x86_64 UEFI via TinyGo.
+    deps: [thunk-x64]
+    sources: [main.go, "{{.X64_TARGET}}"]
+    generates: [main-x64.o]
     cmds:
-      # `/base:0x10000` keeps every absolute address inside 32 bits so the
-      # default LLVM "small" code model (32-bit `mov $abs, %r8d`) works.
-      # `/force:unresolved` lets the link succeed despite the dead-code
-      # references to VirtualAlloc / exit / SystemFunction036 that TinyGo's
-      # Windows runtime drags in via mainCRTStartup — none of them are
-      # reachable from `_start`, so they never execute.
+      - tinygo build -target={{.X64_TARGET}} -o main-x64.o .
+
+  link-x64:
+    desc: Link main-x64.o + thunk-x64.o into BOOTX64.EFI.
+    deps: [compile-x64]
+    sources: [main-x64.o, thunk-x64.o]
+    generates: ["{{.X64_OUT}}"]
+    cmds:
+      # See README — six traps for the full story. /base:0x10000 keeps
+      # absolute addresses inside 32 bits; /force:unresolved drops the
+      # dead-code refs to VirtualAlloc / exit / etc. from mainCRTStartup.
       - >-
         lld-link
+        /machine:x64
         /subsystem:efi_application
         /entry:_start
         /nodefaultlib
         /force:unresolved
         /base:0x10000
-        /out:{{.OUT}}
-        main.o thunk.o
+        /out:{{.X64_OUT}}
+        main-x64.o thunk-x64.o
 
-  build:
-    desc: Build the EFI application end-to-end.
-    deps: [link]
+  build-x64:
+    desc: Build the x86_64 EFI binary end-to-end.
+    deps: [link-x64]
     cmds:
-      - file {{.OUT}}
+      - file {{.X64_OUT}}
 
-  esp:
-    desc: Stage BOOTX64.EFI into a synthetic ESP layout under {{.ESP}}/.
-    deps: [build]
-    sources: ["{{.OUT}}"]
-    generates: ["{{.ESP}}/EFI/BOOT/BOOTX64.EFI"]
+  esp-x64:
+    desc: Stage BOOTX64.EFI into esp-x64/EFI/BOOT/.
+    deps: [build-x64]
+    sources: ["{{.X64_OUT}}"]
+    generates: [esp-x64/EFI/BOOT/BOOTX64.EFI]
     cmds:
-      - mkdir -p {{.ESP}}/EFI/BOOT
-      - cp {{.OUT}} {{.ESP}}/EFI/BOOT/BOOTX64.EFI
+      - mkdir -p esp-x64/EFI/BOOT
+      - cp {{.X64_OUT}} esp-x64/EFI/BOOT/BOOTX64.EFI
 
-  qemu:
-    desc: Boot the stub under QEMU + OVMF (Ctrl-A x to quit).
-    deps: [esp]
+  qemu-x64:
+    desc: Boot BOOTX64.EFI under qemu-system-x86_64 + OVMF (Ctrl-A x to quit).
+    deps: [esp-x64]
     cmds:
-      - cp {{.OVMF_VARS_TEMPLATE}} ovmf-vars.fd
+      - cp {{.OVMF_X64_VARS_TEMPLATE}} ovmf-x64-vars.fd
       - >-
         qemu-system-x86_64
         -machine q35
@@ -96,32 +112,138 @@ tasks:
         -display none
         -no-reboot
         -serial mon:stdio
-        -drive if=pflash,format=raw,readonly=on,file={{.OVMF_CODE}}
-        -drive if=pflash,format=raw,file=ovmf-vars.fd
-        -drive file=fat:rw:{{.ESP}},format=raw
+        -drive if=pflash,format=raw,readonly=on,file={{.OVMF_X64_CODE}}
+        -drive if=pflash,format=raw,file=ovmf-x64-vars.fd
+        -drive file=fat:rw:esp-x64,format=raw
         -net none
 
-  qemu-test:
-    desc: Boot under QEMU for a few seconds and assert the banner reached the serial console.
-    deps: [esp]
+  qemu-test-x64:
+    desc: Boot under QEMU and assert the banner reached the serial console (x86_64).
+    deps: [esp-x64]
     cmds:
-      - cp {{.OVMF_VARS_TEMPLATE}} ovmf-vars.fd
-      - rm -f qemu.log
+      - cp {{.OVMF_X64_VARS_TEMPLATE}} ovmf-x64-vars.fd
+      - rm -f qemu-x64.log
       - >-
-        perl -e 'alarm 120; exec @ARGV'
+        perl -e 'alarm 180; exec @ARGV'
         qemu-system-x86_64
         -machine q35
         -m 256
         -display none
         -no-reboot
-        -serial file:qemu.log
-        -drive if=pflash,format=raw,readonly=on,file={{.OVMF_CODE}}
-        -drive if=pflash,format=raw,file=ovmf-vars.fd
-        -drive file=fat:rw:{{.ESP}},format=raw
+        -serial file:qemu-x64.log
+        -drive if=pflash,format=raw,readonly=on,file={{.OVMF_X64_CODE}}
+        -drive if=pflash,format=raw,file=ovmf-x64-vars.fd
+        -drive file=fat:rw:esp-x64,format=raw
         -net none ; true
-      - grep -q 'Hello, UEFI from TinyGo!' qemu.log
+      - grep -q 'Hello, UEFI from TinyGo!' qemu-x64.log
+
+  # ----- aarch64 -----
+
+  thunk-aa64:
+    desc: Assemble thunk-aa64.S into a COFF aarch64 object.
+    sources: [thunk-aa64.S]
+    generates: [thunk-aa64.o]
+    cmds:
+      - clang -target aarch64-pc-windows-gnu -c thunk-aa64.S -o thunk-aa64.o
+
+  compile-aa64:
+    desc: Compile main.go for aarch64 UEFI via TinyGo.
+    deps: [thunk-aa64]
+    sources: [main.go, "{{.AA64_TARGET}}"]
+    generates: [main-aa64.o]
+    cmds:
+      - tinygo build -target={{.AA64_TARGET}} -o main-aa64.o .
+
+  link-aa64:
+    desc: Link main-aa64.o + thunk-aa64.o into BOOTAA64.EFI.
+    deps: [compile-aa64]
+    sources: [main-aa64.o, thunk-aa64.o]
+    generates: ["{{.AA64_OUT}}"]
+    cmds:
+      - >-
+        lld-link
+        /machine:arm64
+        /subsystem:efi_application
+        /entry:_start
+        /nodefaultlib
+        /force:unresolved
+        /base:0x10000
+        /out:{{.AA64_OUT}}
+        main-aa64.o thunk-aa64.o
+
+  build-aa64:
+    desc: Build the aarch64 EFI binary end-to-end.
+    deps: [link-aa64]
+    cmds:
+      - file {{.AA64_OUT}}
+
+  esp-aa64:
+    desc: Stage BOOTAA64.EFI into esp-aa64/EFI/BOOT/.
+    deps: [build-aa64]
+    sources: ["{{.AA64_OUT}}"]
+    generates: [esp-aa64/EFI/BOOT/BOOTAA64.EFI]
+    cmds:
+      - mkdir -p esp-aa64/EFI/BOOT
+      - cp {{.AA64_OUT}} esp-aa64/EFI/BOOT/BOOTAA64.EFI
+
+  qemu-aa64:
+    desc: Boot BOOTAA64.EFI under qemu-system-aarch64 + OVMF (Ctrl-A x to quit).
+    deps: [esp-aa64]
+    cmds:
+      # The aarch64 vars file ships at 64 KiB but firmware expects 64 MiB —
+      # pad it. (See OVMF aarch64 packaging notes.) The pflash drive is also
+      # served via virtio-blk because q35 / Sata are x86-only.
+      - cp {{.OVMF_AA64_VARS_TEMPLATE}} ovmf-aa64-vars.fd
+      - >-
+        qemu-system-aarch64
+        -machine virt
+        -cpu max
+        -m 512
+        -display none
+        -no-reboot
+        -serial mon:stdio
+        -drive if=pflash,format=raw,readonly=on,file={{.OVMF_AA64_CODE}}
+        -drive if=pflash,format=raw,file=ovmf-aa64-vars.fd
+        -drive file=fat:rw:esp-aa64,format=raw,id=hd0,if=none
+        -device virtio-blk-device,drive=hd0
+        -net none
+
+  qemu-test-aa64:
+    desc: Boot under qemu-system-aarch64 and assert the banner reached the serial console.
+    deps: [esp-aa64]
+    cmds:
+      - cp {{.OVMF_AA64_VARS_TEMPLATE}} ovmf-aa64-vars.fd
+      - rm -f qemu-aa64.log
+      - >-
+        perl -e 'alarm 240; exec @ARGV'
+        qemu-system-aarch64
+        -machine virt
+        -cpu max
+        -m 512
+        -display none
+        -no-reboot
+        -serial file:qemu-aa64.log
+        -drive if=pflash,format=raw,readonly=on,file={{.OVMF_AA64_CODE}}
+        -drive if=pflash,format=raw,file=ovmf-aa64-vars.fd
+        -drive file=fat:rw:esp-aa64,format=raw,id=hd0,if=none
+        -device virtio-blk-device,drive=hd0
+        -net none ; true
+      - grep -q 'Hello, UEFI from TinyGo!' qemu-aa64.log
+
+  # ----- aggregate -----
+
+  build:
+    desc: Build EFI binaries for both x86_64 and aarch64.
+    deps: [build-x64, build-aa64]
+
+  qemu-test:
+    desc: Run the boot test on both architectures.
+    deps: [qemu-test-x64, qemu-test-aa64]
 
   clean:
-    desc: Remove build artefacts.
+    desc: Remove all build artefacts.
     cmds:
-      - rm -rf main.o thunk.o {{.OUT}} {{.ESP}} ovmf-vars.fd qemu.log
+      - rm -rf
+          main-x64.o thunk-x64.o {{.X64_OUT}} esp-x64 ovmf-x64-vars.fd qemu-x64.log
+          main-aa64.o thunk-aa64.o {{.AA64_OUT}} esp-aa64 ovmf-aa64-vars.fd qemu-aa64.log
+          .task

@@ -9,9 +9,9 @@ anyone assembling a UKI: pair this stub with
 [`go-coff/pec`](https://github.com/go-coff/pec) and the whole pipeline
 runs without `binutils` and without `systemd-stub`.
 
-> **Status:** phase 1 — boots under OVMF, prints a banner via
-> `SimpleTextOutput`, then spins. Self-PE inspection and the kernel
-> handoff land in phase 2 and 3.
+> **Status:** phase 1 — boots under OVMF (x86_64 and aarch64), prints
+> a banner via `SimpleTextOutput`, then spins. Self-PE inspection and
+> the kernel handoff land in phase 2 and 3.
 
 ## Why TinyGo and not Go
 
@@ -27,9 +27,18 @@ lines of PE walking and protocol calls, that's an acceptable trade.
 ## Building
 
 ```sh
-task build      # main.o (TinyGo) + thunk.o (clang) → BOOTX64.EFI via lld-link
-task qemu       # boot under OVMF; Ctrl-A x to quit
-task qemu-test  # boot, grep the serial log for the banner, fail if absent
+# Per-arch primitives (substitute x64 or aa64).
+task build-x64       # main-x64.o (TinyGo) + thunk-x64.o (clang) → BOOTX64.EFI
+task qemu-x64        # boot under OVMF; Ctrl-A x to quit
+task qemu-test-x64   # boot, grep the serial log for the banner, fail if absent
+
+task build-aa64      # same pipeline for aarch64 → BOOTAA64.EFI
+task qemu-aa64
+task qemu-test-aa64
+
+# Aggregates that fan out over both architectures.
+task build           # build-x64 + build-aa64
+task qemu-test       # qemu-test-x64 + qemu-test-aa64
 task clean
 ```
 
@@ -39,8 +48,11 @@ Dependencies on the host:
   or the official tarballs on Linux)
 - **lld** (the standalone `lld-link` — TinyGo bundles lld as a library,
   not as a binary)
-- **QEMU** with OVMF (`brew install qemu`; on Debian / Ubuntu
-  `qemu-system-x86 ovmf`)
+- **QEMU** with OVMF for both architectures (`brew install qemu`;
+  on Debian / Ubuntu `qemu-system-x86 qemu-system-arm ovmf
+  qemu-efi-aarch64`). On Apple Silicon hosts, `qemu-system-aarch64`
+  uses HVF and runs near-native; `qemu-system-x86_64` falls back to
+  TCG and is noticeably slower.
 - **clang** (already in Xcode CLT on macOS; `clang` package on Linux)
 
 ## The six traps we hit (and how to dodge them)
@@ -83,16 +95,23 @@ of `EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL` by 8 bytes, and the firmware looks
 nothing like what we expect. **Always declare EFI method slots as
 `uintptr`** and route the actual indirect call through a thunk.
 
-### 5. Microsoft x64 vs TinyGo's call ABI
+### 5. Calling-convention shuffle
 
-TinyGo's calls into external functions on `goos=windows goarch=amd64`
-already follow MS x64 (args in RCX, RDX, R8, R9). But Go function-value
-calls don't, and even if they did, the firmware-side function pointer
-needs the args in a different position from what TinyGo gave us
-(because we hand the fn pointer as the first arg). **One asm thunk per
-arity** (see [`thunk.S`](thunk.S)) handles the shuffle: slide the fn
-pointer out of RCX into RAX, slide every other arg one slot left, then
-`call *%rax`.
+TinyGo's calls into external functions on `goos=windows` follow the
+platform ABI — MS x64 on amd64 (args in RCX, RDX, R8, R9) and AAPCS64
+on aarch64 (args in X0..X7). But the firmware-side function pointer
+needs the args in a different position from what TinyGo gave us,
+because we pass the fn pointer as the **first** Go arg (so it lands
+in the first register that should otherwise hold the first EFI arg).
+**One asm thunk per arity per arch** ([`thunk-x64.S`](thunk-x64.S),
+[`thunk-aa64.S`](thunk-aa64.S)) handles the shuffle: slide the fn
+pointer out of RCX/X0 into a scratch register and slide every other
+arg one slot left, then `call`/`blr`.
+
+On aarch64 this is appreciably simpler than on x86_64: a single
+calling convention is shared by Linux and Windows ABIs (no MS-vs-SysV
+split), no shadow space, and the first six args we ever need (fn + 5
+EFI args) all fit in registers without stack juggling.
 
 ### 6. Image base above 4 GB defeats the small code model
 
@@ -108,29 +127,32 @@ under 4 GB and the encoding becomes valid.
 ```text
 stub/
 ├── main.go                EFI structs (uintptr method slots) + _start + banner
-├── thunk.S                MS x64 thunks: efiCall1..5
+├── thunk-x64.S            MS x64 thunks: efiCall1..5 (RCX/RDX/R8/R9 shuffle)
+├── thunk-aa64.S           AAPCS64 thunks: efiCall1..5 (X0..X5 shuffle)
 ├── targets/
-│   └── uefi-x64.json      TinyGo target: x86_64-pc-windows-gnu + freestanding
-├── Taskfile.yaml          thunk → compile → link → esp → qemu / qemu-test
+│   ├── uefi-x64.json      TinyGo target: x86_64-pc-windows-gnu + freestanding
+│   └── uefi-aa64.json     TinyGo target: aarch64-pc-windows-gnu + freestanding
+├── Taskfile.yaml          per-arch: thunk → compile → link → esp → qemu / qemu-test
 ├── go.mod
 ├── renovate.json
 ├── LICENSE                BSD 3-Clause, "The go-coff Authors"
 └── .github/workflows/
-    └── ci.yml             build + qemu-test on ubuntu-latest (KVM-accelerated)
+    └── ci.yml             matrix [x64, aa64] on ubuntu-latest
 ```
 
 ## Roadmap
 
 - **Phase 1** ✅ — print banner via `ConOut->OutputString`, spin.
+  Works on both x86_64 and aarch64.
 - **Phase 2** — locate our own PE image at runtime via
   `EFI_LOADED_IMAGE_PROTOCOL`, parse the embedded section table, look
   up `.linux` / `.initrd` / `.cmdline`.
 - **Phase 3** — install `EFI_LOAD_FILE2_PROTOCOL` on a vendor-media
   device path so the kernel picks up the initrd, jump into the kernel
   via the EFI handover protocol.
-- **aarch64 / riscv64** — duplicate the target JSON with the matching
-  triple (`aarch64-pc-windows-gnu` etc.) and reproduce the thunk in the
-  respective ABI.
+- **riscv64** — duplicate the recipe one more time with the
+  `riscv64-pc-windows-gnu` triple and a thunk in the RISC-V ABI
+  (`a0..a7` arg registers, `ra` link register).
 
 ## License
 

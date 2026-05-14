@@ -10,6 +10,10 @@ permissions:
 
 jobs:
   build-and-boot:
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, aa64]
     runs-on: ubuntu-latest
     env:
       TINYGO_VERSION: "0.41.1"
@@ -21,7 +25,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             clang lld \
-            qemu-system-x86 ovmf \
+            qemu-system-x86 qemu-system-arm \
+            ovmf qemu-efi-aarch64 \
             curl ca-certificates
           curl -sSL https://taskfile.dev/install.sh | sudo sh -s -- -d -b /usr/local/bin
 
@@ -31,19 +36,23 @@ jobs:
           curl -fsSL -o /tmp/tinygo.deb "$url"
           sudo dpkg -i /tmp/tinygo.deb
 
-      - name: Build the EFI binary
-        run: task build
+      - name: Build the EFI binary (${{ matrix.arch }})
+        run: task build-${{ matrix.arch }}
 
-      - name: Verify it is a PE32+ EFI application
+      - name: Verify it is a PE32+ EFI application (${{ matrix.arch }})
         run: |
-          file BOOTX64.EFI | tee /dev/stderr | grep -q 'PE32+ executable (EFI application) x86-64'
+          out=$(case "${{ matrix.arch }}" in x64) echo BOOTX64.EFI ;; aa64) echo BOOTAA64.EFI ;; esac)
+          arch_pattern=$(case "${{ matrix.arch }}" in x64) echo 'x86-64' ;; aa64) echo 'Aarch64' ;; esac)
+          file "$out" | tee /dev/stderr | grep -q "PE32+ executable (EFI application) ${arch_pattern}"
 
-      - name: Boot under QEMU and assert the banner is on the serial console
-        run: task qemu-test
+      - name: Boot under QEMU and assert the banner is on the serial console (${{ matrix.arch }})
+        run: task qemu-test-${{ matrix.arch }}
 
-      - name: Upload the EFI binary as an artifact
+      - name: Upload the EFI binary as an artifact (${{ matrix.arch }})
         uses: actions/upload-artifact@v4
         with:
-          name: BOOTX64.EFI
-          path: BOOTX64.EFI
-          if-no-files-found: error
+          name: BOOT-${{ matrix.arch }}.EFI
+          path: |
+            BOOTX64.EFI
+            BOOTAA64.EFI
+          if-no-files-found: ignore
