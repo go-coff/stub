@@ -475,7 +475,8 @@ tasks:
         -drive file=fat:rw:esp-uki3a-x64,format=raw
         -net none ; true
       - grep -q 'PHASE3A-DONE' qemu-uki3a-x64.log
-      - "grep -q 'UKI payload sections found: 3/5' qemu-uki3a-x64.log"
+      - "grep -q 'UKI payload sections found: 4/5' qemu-uki3a-x64.log"
+      - grep -q 'PHASE3B-DONE' qemu-uki3a-x64.log
       - grep -q 'console=ttyS0 quiet rw' qemu-uki3a-x64.log
 
   uki3a-test-aa64:
@@ -501,7 +502,8 @@ tasks:
         -device virtio-blk-device,drive=hd0
         -net none ; true
       - grep -q 'PHASE3A-DONE' qemu-uki3a-aa64.log
-      - "grep -q 'UKI payload sections found: 3/5' qemu-uki3a-aa64.log"
+      - "grep -q 'UKI payload sections found: 4/5' qemu-uki3a-aa64.log"
+      - grep -q 'PHASE3B-DONE' qemu-uki3a-aa64.log
       - grep -q 'console=ttyS0 quiet rw' qemu-uki3a-aa64.log
 
   # ----- aggregate -----

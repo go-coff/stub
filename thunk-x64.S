@@ -118,3 +118,73 @@ efiCall6:
     callq   *%rax
     addq    $0x38, %rsp
     retq
+
+    // ----- LoadFile2 callback (phase 3b) -----
+    //
+    // EFI_STATUS loadFile2(self, devPath, bootPolicy, *bufSize, buf)
+    //
+    // Microsoft x64 (firmware → us):
+    //   RCX = self        (ignored)
+    //   RDX = devPath     (ignored — Linux only matches by GUID)
+    //   R8  = bootPolicy  (UINT8, ignored)
+    //   R9  = *bufSize    (IN/OUT pointer to UINTN)
+    //   [rsp+0x28] = buf
+    //
+    // Behaviour:
+    //   * if *bufSize < initrdSize → write initrdSize to *bufSize,
+    //     return EFI_BUFFER_TOO_SMALL (0x8000000000000005)
+    //   * else → copy initrdSize bytes from initrdDataPtr to buf, set
+    //     *bufSize = initrdSize, return EFI_SUCCESS (0)
+    //
+    // The kernel always calls us twice: once with buf=NULL to discover
+    // the size, once with a buffer of that size to fetch the bytes.
+    .globl loadFile2
+loadFile2:
+    movq    initrdSize(%rip), %rax  // rax = our initrd size
+    movq    (%r9), %r10             // r10 = *bufSize (caller's view)
+    cmpq    %rax, %r10
+    jb      .Lsmall                 // jump if caller's buffer is too small
+
+    // Copy initrdSize bytes from initrdDataPtr to buf.
+    // RDI and RSI are non-volatile in MS x64, save them.
+    pushq   %rsi
+    pushq   %rdi
+    movq    0x38(%rsp), %rdi        // buf — orig [rsp+0x28] is now +0x38 after 2 pushes
+    movq    initrdDataPtr(%rip), %rsi
+    movq    %rax, %rcx              // count = initrdSize
+    cld
+    rep movsb
+    popq    %rdi
+    popq    %rsi
+
+    movq    %rax, (%r9)             // write the actually-copied size
+    xorq    %rax, %rax              // EFI_SUCCESS
+    retq
+
+.Lsmall:
+    movq    %rax, (%r9)             // write the needed size
+    movabsq $0x8000000000000005, %rax  // EFI_BUFFER_TOO_SMALL
+    retq
+
+    // BSS-resident globals shared with the Go side. We define them in
+    // assembly so the symbol names are flat (`initrdSize` etc., not
+    // `main.initrdSize`); Go binds via //go:linkname.
+    .bss
+    .globl initrdSize
+    .balign 8
+initrdSize:
+    .quad 0
+
+    .globl initrdDataPtr
+    .balign 8
+initrdDataPtr:
+    .quad 0
+
+    // loadFile2Entry holds the address of loadFile2 above. We put it in
+    // .data so the linker resolves the symbol value at link time and
+    // _start does not have to compute it.
+    .data
+    .globl loadFile2Entry
+    .balign 8
+loadFile2Entry:
+    .quad loadFile2

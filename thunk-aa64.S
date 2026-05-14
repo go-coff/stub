@@ -106,3 +106,70 @@ efiCall6:
     blr x9
     ldp x29, x30, [sp], #16
     ret
+
+    // ----- LoadFile2 callback (phase 3b) -----
+    //
+    // EFI_STATUS loadFile2(self, devPath, bootPolicy, *bufSize, buf)
+    //
+    // AAPCS64 (firmware → us):
+    //   X0 = self        (ignored)
+    //   X1 = devPath     (ignored)
+    //   X2 = bootPolicy  (ignored)
+    //   X3 = *bufSize    (IN/OUT pointer to UINTN)
+    //   X4 = buf
+    //
+    // Same protocol as the x86_64 sibling above — see comments there.
+    .globl loadFile2
+loadFile2:
+    adrp    x5, initrdSize
+    add     x5, x5, :lo12:initrdSize
+    ldr     x5, [x5]                 // x5 = our initrd size
+    ldr     x6, [x3]                 // x6 = *bufSize
+    cmp     x6, x5
+    b.lo    .Lsmall_aa64             // unsigned <, buffer too small
+
+    // Copy x5 bytes from initrdDataPtr → buf (x4). Scalar byte loop:
+    // small initrds boot just as quickly, and we avoid any alignment
+    // surprise on the firmware-owned buffer.
+    adrp    x7, initrdDataPtr
+    add     x7, x7, :lo12:initrdDataPtr
+    ldr     x7, [x7]                 // x7 = initrdDataPtr
+    mov     x8, #0                   // loop index
+.Lcopy_aa64:
+    cmp     x8, x5
+    b.ge    .Ldone_aa64
+    ldrb    w9, [x7, x8]
+    strb    w9, [x4, x8]
+    add     x8, x8, #1
+    b       .Lcopy_aa64
+.Ldone_aa64:
+    str     x5, [x3]                 // *bufSize = initrdSize
+    mov     x0, #0                   // EFI_SUCCESS
+    ret
+
+.Lsmall_aa64:
+    str     x5, [x3]                 // *bufSize = needed size
+    // EFI_BUFFER_TOO_SMALL = 0x8000000000000005. Build it in two steps:
+    // low 16 bits = 5, then OR the MSB.
+    mov     x0, #5
+    movk    x0, #0x8000, lsl #48
+    ret
+
+    // BSS-resident globals shared with the Go side. Same scheme as the
+    // x86_64 sibling above; Go binds via //go:linkname.
+    .bss
+    .globl initrdSize
+    .balign 8
+initrdSize:
+    .quad 0
+
+    .globl initrdDataPtr
+    .balign 8
+initrdDataPtr:
+    .quad 0
+
+    .data
+    .globl loadFile2Entry
+    .balign 8
+loadFile2Entry:
+    .quad loadFile2

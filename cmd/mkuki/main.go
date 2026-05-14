@@ -49,6 +49,17 @@ func main() {
 			Data:            []byte("6.10.0-test"),
 			Characteristics: pe.DefaultCharacteristics,
 		},
+		{
+			// Fixed test pattern. The phase-3b LoadFile2 callback in the
+			// stub does not get invoked from inside our own test (no
+			// kernel calls LocateProtocol / OpenProtocol on us) — the
+			// real validation here is just that
+			// InstallProtocolInterface succeeded and PHASE3B-DONE made
+			// it to the serial console.
+			Name:            ".initrd",
+			Data:            []byte("GOCOFFINITRD"),
+			Characteristics: pe.DefaultCharacteristics,
+		},
 	}
 
 	res, err := pe.Append(stub, sections)

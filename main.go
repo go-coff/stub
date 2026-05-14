@@ -95,6 +95,69 @@ type efiBootServices struct {
 	// it, so leaving the struct short is harmless.
 }
 
+// EFI_DEVICE_PATH_PROTOCOL header (4 bytes). A device path is a chain of
+// these nodes terminated by an "end of hardware device path" node
+// (Type=0x7F, SubType=0xFF, Length=4).
+type efiDevicePathHeader struct {
+	dpType    uint8
+	dpSubType uint8
+	dpLength  uint16 // little-endian, includes the header
+}
+
+// vendorMediaInitrdPath is the device path Linux ≥ 5.7 looks up to find
+// an embedded initrd. Layout:
+//
+//	[0:4]   header (Type=0x04 MEDIA_DEVICE_PATH, SubType=0x03 VENDOR, Length=20)
+//	[4:20]  Linux initrd vendor GUID 5568e427-68fc-4f3d-ac74-ca555231cc68
+//	[20:24] end-of-path header (Type=0x7F, SubType=0xFF, Length=4)
+//
+// The whole blob lives in BSS so its address is stable across the call to
+// InstallProtocolInterface — same escape-analysis rule as the other
+// firmware-facing buffers.
+var vendorMediaInitrdPath [24]uint8
+
+// initrdDataPtr and initrdSize back the LoadFile2 callback (see
+// thunk-{x64,aa64}.S `loadFile2`): when the kernel calls our LoadFile,
+// the asm reads these globals and copies the bytes out. They are
+// populated in _start once `.initrd` is located.
+//
+// We expose them via `//go:linkname` so the assembly can refer to them
+// by their bare names rather than the package-mangled `main.…`.
+//
+//go:linkname initrdDataPtr initrdDataPtr
+var initrdDataPtr uintptr
+
+//go:linkname initrdSize initrdSize
+var initrdSize uint64
+
+// loadFile2Entry is the address of the LoadFile2 callback implemented
+// in asm. We populate it from the assembly side via a `.quad` data
+// symbol so that no Go-side function-value or fat-pointer is involved
+// (see trap #4 in the README).
+//
+//go:linkname loadFile2Entry loadFile2Entry
+var loadFile2Entry uintptr
+
+// initrdHandle is the OUT slot for InstallProtocolInterface — it
+// receives a fresh handle that owns our LoadFile2 + DevicePath
+// protocols. Must be BSS (escape-analysis rule again).
+var initrdHandle uintptr
+
+// EFI_LOAD_FILE2_PROTOCOL — a single LoadFile entry point. Spec:
+//
+//	EFI_STATUS LoadFile(this, devPath, bootPolicy, bufSize *UINTN, buf VOID*);
+//
+// The slot is a uintptr (not `func(...)`) so the struct layout matches
+// the C definition byte-for-byte.
+type efiLoadFile2Protocol struct {
+	loadFile uintptr
+}
+
+// ourLoadFile2 is the protocol instance the firmware sees. Lives in BSS
+// so its address is stable and so the installed pointer keeps resolving
+// after _start has run.
+var ourLoadFile2 efiLoadFile2Protocol
+
 // EFI_LOADED_IMAGE_PROTOCOL — gives us our own image's base address and
 // size in memory once the firmware has loaded us.
 type efiLoadedImageProtocol struct {
@@ -142,6 +205,33 @@ var loadedImageGUID = efiGUID{
 	0x62, 0x95,
 	0xD2, 0x11,
 	0x8E, 0x3F, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B,
+}
+
+// EFI_LOAD_FILE2_PROTOCOL_GUID: 4006C0C1-FCB3-403E-996D-4A6C8724E06D.
+var loadFile2GUID = efiGUID{
+	0xC1, 0xC0, 0x06, 0x40,
+	0xB3, 0xFC,
+	0x3E, 0x40,
+	0x99, 0x6D, 0x4A, 0x6C, 0x87, 0x24, 0xE0, 0x6D,
+}
+
+// EFI_DEVICE_PATH_PROTOCOL_GUID: 09576E91-6D3F-11D2-8E39-00A0C969723B.
+var devicePathGUID = efiGUID{
+	0x91, 0x6E, 0x57, 0x09,
+	0x3F, 0x6D,
+	0xD2, 0x11,
+	0x8E, 0x39, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B,
+}
+
+// LINUX_EFI_INITRD_MEDIA_GUID: 5568E427-68FC-4F3D-AC74-CA555231CC68.
+// The Linux kernel ≥ 5.7 walks every UEFI handle that exposes a media
+// vendor device path with this GUID and, if it finds one, calls the
+// associated LoadFile2 protocol to pull its initrd out.
+var linuxInitrdGUID = efiGUID{
+	0x27, 0xE4, 0x68, 0x55,
+	0xFC, 0x68,
+	0x3D, 0x4F,
+	0xAC, 0x74, 0xCA, 0x55, 0x52, 0x31, 0xCC, 0x68,
 }
 
 // ----- Thunks (see thunk-{x64,aa64}.S) -----
@@ -529,6 +619,74 @@ func _start(imageHandle uintptr, st *efiSystemTable) efiStatus {
 	writeASCII(co, "Phase 3a - UKI section discovery\r\n")
 	reportUKI(co, lip.imageBase)
 	writeASCII(co, "PHASE3A-DONE\r\n")
+
+	// ----- Phase 3b — expose .initrd via EFI_LOAD_FILE2_PROTOCOL -----
+	//
+	// Linux ≥ 5.7 finds an embedded initrd by walking every UEFI handle
+	// whose device path is a MEDIA_VENDOR node carrying the
+	// LINUX_EFI_INITRD_MEDIA_GUID. We build exactly such a device path,
+	// publish a LoadFile2 protocol whose entry point is implemented in
+	// asm (see loadFile2 in thunk-{x64,aa64}.S), and install both on a
+	// fresh handle. The asm callback reads `initrdDataPtr` / `initrdSize`
+	// — package-level vars we populate just below — to serve the bytes.
+	if secInitrd.found && secInitrd.vsize > 0 {
+		writeASCII(co, "Phase 3b - initrd LoadFile2\r\n")
+
+		// MEDIA_DEVICE_PATH (4) / MEDIA_VENDOR (3), length 20 (4-byte
+		// header + 16-byte GUID).
+		vendorMediaInitrdPath[0] = 0x04
+		vendorMediaInitrdPath[1] = 0x03
+		vendorMediaInitrdPath[2] = 20
+		vendorMediaInitrdPath[3] = 0
+		for i := 0; i < 16; i++ {
+			vendorMediaInitrdPath[4+i] = linuxInitrdGUID[i]
+		}
+		// End-of-hardware-device-path node: Type=0x7F, SubType=0xFF, Length=4.
+		vendorMediaInitrdPath[20] = 0x7F
+		vendorMediaInitrdPath[21] = 0xFF
+		vendorMediaInitrdPath[22] = 4
+		vendorMediaInitrdPath[23] = 0
+
+		initrdDataPtr = lip.imageBase + uintptr(secInitrd.vaddr)
+		initrdSize = uint64(secInitrd.vsize)
+		ourLoadFile2.loadFile = loadFile2Entry
+
+		// First InstallProtocolInterface call creates a handle (because
+		// initrdHandle starts at 0 / NULL) and binds the DevicePath
+		// protocol to it. Second call adds LoadFile2 on the same handle.
+		const efiNativeInterface = 0
+		status = efiCall4(bs.installProtocolInterface,
+			uintptr(unsafe.Pointer(&initrdHandle)),
+			uintptr(unsafe.Pointer(&devicePathGUID)),
+			efiNativeInterface,
+			uintptr(unsafe.Pointer(&vendorMediaInitrdPath[0])))
+		if status != efiSuccess {
+			writeASCII(co, "InstallProtocolInterface(DevicePath) failed: ")
+			writeHex64(co, status)
+			writeASCII(co, "\r\nPHASE3B-FAIL\r\n")
+			for {
+			}
+		}
+		status = efiCall4(bs.installProtocolInterface,
+			uintptr(unsafe.Pointer(&initrdHandle)),
+			uintptr(unsafe.Pointer(&loadFile2GUID)),
+			efiNativeInterface,
+			uintptr(unsafe.Pointer(&ourLoadFile2)))
+		if status != efiSuccess {
+			writeASCII(co, "InstallProtocolInterface(LoadFile2) failed: ")
+			writeHex64(co, status)
+			writeASCII(co, "\r\nPHASE3B-FAIL\r\n")
+			for {
+			}
+		}
+		writeASCII(co, "  initrd handle = ")
+		writeHex64(co, uint64(initrdHandle))
+		writeASCII(co, "\r\n  initrd size = ")
+		writeHex64(co, initrdSize)
+		writeASCII(co, "\r\nPHASE3B-DONE\r\n")
+	} else {
+		writeASCII(co, "PHASE3B-SKIPPED (no .initrd section)\r\n")
+	}
 
 	// ----- Phase 3 (chain-load) -----
 	//
