@@ -172,7 +172,9 @@ stub/
 ├── renovate.json
 ├── LICENSE                BSD 3-Clause, "The go-coff Authors"
 └── .github/workflows/
-    └── ci.yml             matrix [x64, aa64] on ubuntu-latest
+    └── ci.yml             matrix [x64, aa64] + a single-ISO job that
+                           boots stub.iso on both qemu-system-x86_64
+                           and qemu-system-aarch64
 ```
 
 ## Roadmap
