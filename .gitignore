@@ -16,3 +16,10 @@
 /esp-aa64/
 /ovmf-aa64-vars.fd
 /qemu-aa64.log
+
+# Multi-arch ISO artefacts.
+/esp.img
+/stub.iso
+/iso-root/
+/qemu-iso-x64.log
+/qemu-iso-aa64.log

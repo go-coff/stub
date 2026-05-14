@@ -39,8 +39,27 @@ task qemu-test-aa64
 # Aggregates that fan out over both architectures.
 task build           # build-x64 + build-aa64
 task qemu-test       # qemu-test-x64 + qemu-test-aa64
+
+# Single multi-arch ISO that boots on x86_64 AND aarch64.
+task iso             # → stub.iso (also esp.img, the embedded FAT image)
+task qemu-iso-x64    # boot stub.iso under qemu-system-x86_64
+task qemu-iso-aa64   # boot stub.iso under qemu-system-aarch64
+task qemu-iso-test   # qemu-iso-test-x64 + qemu-iso-test-aa64
+
 task clean
 ```
+
+The `iso` target produces one bootable image that contains BOTH
+`BOOTX64.EFI` and `BOOTAA64.EFI` under `/EFI/BOOT/` inside a single FAT
+filesystem. UEFI firmware on x86_64 looks up `BOOTX64.EFI`, firmware on
+aarch64 looks up `BOOTAA64.EFI`; both names coexist so the same ISO
+boots on either platform. The image is hybrid: it works as a CD/DVD
+(via El Torito UEFI boot record), as a USB stick (via a GPT ESP
+partition appended after the ISO 9660 area), or as a virtual disk in
+QEMU.
+
+Build-time dependencies for the ISO route: `mtools` (FAT image
+authoring without root) and `xorriso` (hybrid GPT ISO).
 
 Dependencies on the host:
 
@@ -53,9 +72,12 @@ Dependencies on the host:
   qemu-efi-aarch64`). On Apple Silicon hosts, `qemu-system-aarch64`
   uses HVF and runs near-native; `qemu-system-x86_64` falls back to
   TCG and is noticeably slower.
+- **mtools** + **xorriso** (only needed if you want to produce
+  `stub.iso`; `brew install mtools xorriso`, Debian / Ubuntu
+  `apt install mtools xorriso`).
 - **clang** (already in Xcode CLT on macOS; `clang` package on Linux)
 
-## The six traps we hit (and how to dodge them)
+## The seven traps we hit (and how to dodge them)
 
 This stub looks small but every line of the toolchain configuration was
 paid for in a debugging session. Documented here so the next person
@@ -113,7 +135,19 @@ calling convention is shared by Linux and Windows ABIs (no MS-vs-SysV
 split), no shadow space, and the first six args we ever need (fn + 5
 EFI args) all fit in registers without stack juggling.
 
-### 6. Image base above 4 GB defeats the small code model
+### 6. El Torito sector-count is a 16-bit field — the ESP must be ≤ 32 MiB
+
+A first attempt at the hybrid ISO used a 32 MiB FAT image embedded as
+the El Torito UEFI boot image. xorriso complained that
+*"Boot image load size exceeds 65535 blocks of 512 bytes. Will record 0
+in El Torito to extend ESP to end-of-medium"* — and OVMF then refused
+to mount it (no `FS0` filesystem alias appeared). The El Torito boot
+catalog's `Sector Count` field is a 16-bit value of 512-byte sectors,
+so anything above 32 MiB overflows; the firmware sees a malformed
+entry. **Pick a FAT image strictly below 32 MiB** (we use 4 MiB, large
+enough that mformat picks FAT16, small enough to fit the sector count).
+
+### 7. Image base above 4 GB defeats the small code model
 
 `lld-link` defaults to `ImageBase = 0x140000000` for PE32+ on amd64.
 LLVM's default code model is "small": absolute addresses are encoded
@@ -133,6 +167,7 @@ stub/
 │   ├── uefi-x64.json      TinyGo target: x86_64-pc-windows-gnu + freestanding
 │   └── uefi-aa64.json     TinyGo target: aarch64-pc-windows-gnu + freestanding
 ├── Taskfile.yaml          per-arch: thunk → compile → link → esp → qemu / qemu-test
+│                          + multi-arch: esp-img → iso → qemu-iso-test
 ├── go.mod
 ├── renovate.json
 ├── LICENSE                BSD 3-Clause, "The go-coff Authors"

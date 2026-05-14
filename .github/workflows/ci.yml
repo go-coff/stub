@@ -9,6 +9,7 @@ permissions:
   contents: read
 
 jobs:
+  # Per-arch sanity: build the .EFI, then boot it on its arch only.
   build-and-boot:
     strategy:
       fail-fast: false
@@ -56,3 +57,54 @@ jobs:
             BOOTX64.EFI
             BOOTAA64.EFI
           if-no-files-found: ignore
+
+  # End-to-end: build both arches, assemble one ISO that contains BOTH binaries,
+  # then boot the same ISO on qemu-system-x86_64 AND qemu-system-aarch64. Each
+  # firmware picks its own BOOT{X64,AA64}.EFI out of the shared FAT image.
+  iso:
+    runs-on: ubuntu-latest
+    needs: build-and-boot
+    env:
+      TINYGO_VERSION: "0.41.1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install host tools (clang, lld, qemu, ovmf, mtools, xorriso, task)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang lld \
+            qemu-system-x86 qemu-system-arm \
+            ovmf qemu-efi-aarch64 \
+            mtools xorriso \
+            curl ca-certificates
+          curl -sSL https://taskfile.dev/install.sh | sudo sh -s -- -d -b /usr/local/bin
+
+      - name: Install TinyGo ${{ env.TINYGO_VERSION }}
+        run: |
+          url="https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo_${TINYGO_VERSION}_amd64.deb"
+          curl -fsSL -o /tmp/tinygo.deb "$url"
+          sudo dpkg -i /tmp/tinygo.deb
+
+      - name: Build the multi-arch ISO
+        run: task iso
+
+      - name: Verify the ISO has both BOOTX64.EFI and BOOTAA64.EFI inside its ESP
+        run: |
+          file stub.iso | tee /dev/stderr | grep -q 'ISO 9660'
+          mdir -i esp.img ::/EFI/BOOT | tee /dev/stderr
+          mdir -i esp.img ::/EFI/BOOT | grep -q 'BOOTX64  EFI'
+          mdir -i esp.img ::/EFI/BOOT | grep -q 'BOOTAA64 EFI'
+
+      - name: Boot the ISO on qemu-system-x86_64 and assert the banner
+        run: task qemu-iso-test-x64
+
+      - name: Boot the ISO on qemu-system-aarch64 and assert the banner
+        run: task qemu-iso-test-aa64
+
+      - name: Upload the ISO as an artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: stub.iso
+          path: stub.iso
+          if-no-files-found: error

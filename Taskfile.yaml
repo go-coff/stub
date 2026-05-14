@@ -230,6 +230,140 @@ tasks:
         -net none ; true
       - grep -q 'Hello, UEFI from TinyGo!' qemu-aa64.log
 
+  # ----- multi-arch ISO -----
+
+  esp-img:
+    desc: Build a single FAT16 image holding both BOOTX64.EFI and BOOTAA64.EFI.
+    deps: [build-x64, build-aa64]
+    sources: ["{{.X64_OUT}}", "{{.AA64_OUT}}"]
+    generates: [esp.img]
+    cmds:
+      # 4 MiB FAT16 image. We need each side of the bargain:
+      #   * Big enough that mformat picks FAT16 (FAT12 also works under 16 MiB
+      #     but is less robust) and that firmware does not reject an
+      #     undersized ESP.
+      #   * Small enough that the El Torito boot record can encode its
+      #     "Sector Count" field — a 16-bit value of 512-byte sectors, so a
+      #     32 MiB image overflows it and xorriso falls back to writing 0
+      #     ("load until end of medium"), which OVMF in particular refuses.
+      - "dd if=/dev/zero of=esp.img bs=1M count=4 status=none"
+      - "mformat -i esp.img ::"
+      - "mmd -i esp.img ::/EFI"
+      - "mmd -i esp.img ::/EFI/BOOT"
+      - "mcopy -i esp.img {{.X64_OUT}}  ::/EFI/BOOT/BOOTX64.EFI"
+      - "mcopy -i esp.img {{.AA64_OUT}} ::/EFI/BOOT/BOOTAA64.EFI"
+
+  iso:
+    desc: Build a hybrid GPT ISO that boots on x86_64 AND aarch64 UEFI firmware.
+    deps: [esp-img]
+    sources: [esp.img]
+    generates: [stub.iso]
+    cmds:
+      # We expose the same FAT image twice:
+      #   (1) inside the ISO 9660 tree at /boot/efi.img — referenced by the
+      #       El Torito UEFI boot record (the path firmware uses on a CD/DVD);
+      #   (2) appended after the ISO as GPT partition 2 with type 0xEF —
+      #       the path firmware uses when the image is written to a USB stick
+      #       or a real block device.
+      # Both views see the same /EFI/BOOT/BOOTX64.EFI + /EFI/BOOT/BOOTAA64.EFI
+      # inside the FAT, so x86_64 and aarch64 firmware each find their file.
+      - mkdir -p iso-root/boot
+      - cp esp.img iso-root/boot/efi.img
+      - >-
+        xorriso -as mkisofs
+        -V GOCOFFSTUB
+        -o stub.iso
+        -eltorito-alt-boot
+        -e boot/efi.img
+        -no-emul-boot
+        -isohybrid-gpt-basdat
+        -append_partition 2 0xef esp.img
+        -appended_part_as_gpt
+        iso-root
+
+  qemu-iso-x64:
+    desc: Boot the multi-arch ISO under qemu-system-x86_64 (CD-ROM / El Torito).
+    deps: [iso]
+    cmds:
+      - cp {{.OVMF_X64_VARS_TEMPLATE}} ovmf-x64-vars.fd
+      # -cdrom + -boot d takes the El Torito UEFI boot record path: OVMF
+      # finds the UEFI boot image listed at /boot/efi.img in the ISO,
+      # loads the FAT inside it, and runs \EFI\BOOT\BOOTX64.EFI from there.
+      - >-
+        qemu-system-x86_64
+        -machine q35
+        -m 256
+        -display none
+        -no-reboot
+        -serial mon:stdio
+        -drive if=pflash,format=raw,readonly=on,file={{.OVMF_X64_CODE}}
+        -drive if=pflash,format=raw,file=ovmf-x64-vars.fd
+        -cdrom stub.iso
+        -boot d
+        -net none
+
+  qemu-iso-aa64:
+    desc: Boot the multi-arch ISO under qemu-system-aarch64.
+    deps: [iso]
+    cmds:
+      - cp {{.OVMF_AA64_VARS_TEMPLATE}} ovmf-aa64-vars.fd
+      - >-
+        qemu-system-aarch64
+        -machine virt
+        -cpu max
+        -m 512
+        -display none
+        -no-reboot
+        -serial mon:stdio
+        -drive if=pflash,format=raw,readonly=on,file={{.OVMF_AA64_CODE}}
+        -drive if=pflash,format=raw,file=ovmf-aa64-vars.fd
+        -drive file=stub.iso,format=raw,id=cd0,if=none,media=cdrom
+        -device virtio-blk-device,drive=cd0
+        -net none
+
+  qemu-iso-test-x64:
+    desc: Boot the multi-arch ISO on qemu-system-x86_64 and assert the banner.
+    deps: [iso]
+    cmds:
+      - cp {{.OVMF_X64_VARS_TEMPLATE}} ovmf-x64-vars.fd
+      - rm -f qemu-iso-x64.log
+      - >-
+        perl -e 'alarm 180; exec @ARGV'
+        qemu-system-x86_64
+        -machine q35
+        -m 256
+        -display none
+        -no-reboot
+        -serial file:qemu-iso-x64.log
+        -drive if=pflash,format=raw,readonly=on,file={{.OVMF_X64_CODE}}
+        -drive if=pflash,format=raw,file=ovmf-x64-vars.fd
+        -cdrom stub.iso
+        -boot d
+        -net none ; true
+      - grep -q 'Hello, UEFI from TinyGo!' qemu-iso-x64.log
+
+  qemu-iso-test-aa64:
+    desc: Boot the multi-arch ISO on qemu-system-aarch64 and assert the banner.
+    deps: [iso]
+    cmds:
+      - cp {{.OVMF_AA64_VARS_TEMPLATE}} ovmf-aa64-vars.fd
+      - rm -f qemu-iso-aa64.log
+      - >-
+        perl -e 'alarm 240; exec @ARGV'
+        qemu-system-aarch64
+        -machine virt
+        -cpu max
+        -m 512
+        -display none
+        -no-reboot
+        -serial file:qemu-iso-aa64.log
+        -drive if=pflash,format=raw,readonly=on,file={{.OVMF_AA64_CODE}}
+        -drive if=pflash,format=raw,file=ovmf-aa64-vars.fd
+        -drive file=stub.iso,format=raw,id=cd0,if=none,media=cdrom
+        -device virtio-blk-device,drive=cd0
+        -net none ; true
+      - grep -q 'Hello, UEFI from TinyGo!' qemu-iso-aa64.log
+
   # ----- aggregate -----
 
   build:
@@ -237,8 +371,12 @@ tasks:
     deps: [build-x64, build-aa64]
 
   qemu-test:
-    desc: Run the boot test on both architectures.
+    desc: Run the boot test on both architectures (raw FAT disk).
     deps: [qemu-test-x64, qemu-test-aa64]
+
+  qemu-iso-test:
+    desc: Run the boot test on both architectures from the same ISO.
+    deps: [qemu-iso-test-x64, qemu-iso-test-aa64]
 
   clean:
     desc: Remove all build artefacts.
@@ -246,4 +384,5 @@ tasks:
       - rm -rf
           main-x64.o thunk-x64.o {{.X64_OUT}} esp-x64 ovmf-x64-vars.fd qemu-x64.log
           main-aa64.o thunk-aa64.o {{.AA64_OUT}} esp-aa64 ovmf-aa64-vars.fd qemu-aa64.log
+          esp.img stub.iso iso-root qemu-iso-x64.log qemu-iso-aa64.log
           .task
