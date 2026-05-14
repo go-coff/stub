@@ -189,6 +189,9 @@ stub/
 ├── targets/
 │   ├── uefi-x64.json      TinyGo target: x86_64-pc-windows-gnu + freestanding
 │   └── uefi-aa64.json     TinyGo target: aarch64-pc-windows-gnu + freestanding
+├── cmd/
+│   ├── mkesp/             FAT16 ESP writer; replaces mtools at build time
+│   └── mkiso/             ISO 9660 + El Torito UEFI writer; replaces xorriso
 ├── Taskfile.yaml          per-arch: thunk → compile → link → esp → qemu / qemu-test
 │                          + multi-arch: esp-img → iso → qemu-iso-test
 ├── go.mod
