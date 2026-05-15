@@ -95,7 +95,7 @@ Dependencies on the host:
   installation already ships a recent Go, but a separate `go` on
   $PATH is what the Taskfile invokes.
 
-## The eight traps we hit (and how to dodge them)
+## The nine traps we hit (and how to dodge them)
 
 This stub looks small but every line of the toolchain configuration was
 paid for in a debugging session. Documented here so the next person
@@ -192,6 +192,55 @@ garbage as a struct.
 a package-level variable (BSS)**. See `loadedImageHolder`, `nameBuf`,
 `lineBuf` in [`main.go`](main.go). Same rule for slices that get their
 backing array's pointer taken — pre-allocate in BSS.
+
+### 9. `//go:linkname` on BSS vars silently shadows the asm side
+
+A subtler cousin of trap #8. We initially tried to share two `uintptr`
+globals between Go and the assembly thunks by declaring them in both
+languages with the same name and binding the Go side via
+`//go:linkname`. It looked like it worked for `initrdDataPtr` and
+`initrdSize` — Go's writes were visible to a Go reader on the same
+address. But the linker had quietly kept **two** definitions (Go's
+zero-initialised global and the asm's `.bss`/`.data` global) at
+different addresses. The Go side wrote to one slot, the assembly
+LoadFile2 callback read from the other (zero), the kernel saw an
+empty initrd and reported `EFI_LOAD_ERROR`.
+
+Worse, when the slot was meant to hold a relocatable function pointer
+(our `loadFile2Entry` containing `.quad loadFile2`), the linker
+preferred the Go side — which is zero — over the asm side that had a
+properly `.reloc`-fixed-up address. The protocol shipped a NULL
+function pointer, the firmware indirect-called it, and we crashed at
+PC=0 inside DxeCore.
+
+**Discipline:**
+
+- Never define the same global symbol in both Go and asm — pick a
+  side and stick to it.
+- For *data* shared with assembly, declare in **Go only**; have the
+  asm reference the Go-mangled name (`main.initrdSize`) or take its
+  address through a small helper.
+- For *function pointers* that must survive `pec.Append` (which
+  doesn't regenerate the base-relocation table), build them with a
+  PC-relative asm helper:
+
+  ```asm
+  // aarch64 — adrp + add are PC-relative, no .reloc fixup needed.
+  loadFile2Ptr:
+      adrp x0, loadFile2
+      add  x0, x0, :lo12:loadFile2
+      ret
+
+  // x86_64 — RIP-relative LEA, same idea.
+  loadFile2Ptr:
+      leaq loadFile2(%rip), %rax
+      retq
+  ```
+
+- For *callbacks* whose body needs to read Go globals, do not
+  re-implement them in asm against asm-side globals. Keep a one-
+  instruction trampoline (`b/jmp goFn`) and write the body in Go
+  with `//go:export goFn` + `//go:nosplit`.
 
 ## Layout
 
