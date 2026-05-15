@@ -116,27 +116,23 @@ type efiDevicePathHeader struct {
 // firmware-facing buffers.
 var vendorMediaInitrdPath [24]uint8
 
-// initrdDataPtr and initrdSize back the LoadFile2 callback (see
-// thunk-{x64,aa64}.S `loadFile2`): when the kernel calls our LoadFile,
-// the asm reads these globals and copies the bytes out. They are
-// populated in _start once `.initrd` is located.
-//
-// We expose them via `//go:linkname` so the assembly can refer to them
-// by their bare names rather than the package-mangled `main.…`.
-//
-//go:linkname initrdDataPtr initrdDataPtr
+// initrdDataPtr and initrdSize back the LoadFile2 callback. They are
+// populated in _start once `.initrd` is located, and read directly by
+// `goLoadFile2` below. Pure Go vars — earlier attempts tried to share
+// them with an asm-side callback via //go:linkname, but the dual
+// definition (Go BSS + asm BSS) ended up at different addresses in
+// the merged image so the asm read zeros.
 var initrdDataPtr uintptr
-
-//go:linkname initrdSize initrdSize
 var initrdSize uint64
 
-// loadFile2Entry is the address of the LoadFile2 callback implemented
-// in asm. We populate it from the assembly side via a `.quad` data
-// symbol so that no Go-side function-value or fat-pointer is involved
-// (see trap #4 in the README).
+// loadFile2Ptr returns the runtime address of the LoadFile2 callback
+// implemented in asm. Implemented PC-relative in the thunks (adrp / lea
+// rip-relative) so no `.reloc` fixup is involved — that matters because
+// `pec.Append` does not regenerate the base-relocation table, which
+// previously caused our function pointer to come out zero at boot.
 //
-//go:linkname loadFile2Entry loadFile2Entry
-var loadFile2Entry uintptr
+//go:linkname loadFile2Ptr loadFile2Ptr
+func loadFile2Ptr() uintptr
 
 // initrdHandle is the OUT slot for InstallProtocolInterface — it
 // receives a fresh handle that owns our LoadFile2 + DevicePath
@@ -572,6 +568,46 @@ func reportUKI(co *efiSimpleTextOutput, imageBase uintptr) {
 	writeASCII(co, "/5\r\n")
 }
 
+// ----- LoadFile2 callback (phase 3b, Go-side implementation) -----
+
+// goLoadFile2 implements EFI_LOAD_FILE2_PROTOCOL.LoadFile for our
+// embedded `.initrd`. The asm shim in thunk-{x64,aa64}.S tail-calls
+// here — TinyGo's `//go:export` emits the function with the platform
+// ABI (MS x64 / AAPCS64), which is what the firmware uses.
+//
+// The signature mirrors the UEFI spec:
+//
+//	EFI_STATUS LoadFile(this, devPath, bootPolicy, *bufSize, buf);
+//
+// On entry:
+//   - self/devPath/bootPolicy are ignored — Linux matches us by GUID.
+//   - bufSize is an IN/OUT pointer to UINTN.
+//   - buf is the firmware-supplied destination buffer.
+//
+// Contract:
+//   - if *bufSize < initrdSize, write initrdSize back and return
+//     EFI_BUFFER_TOO_SMALL (0x8000000000000005). The kernel uses this
+//     as the size discovery path.
+//   - else copy initrdSize bytes from initrdDataPtr to buf, write the
+//     copied size back, return EFI_SUCCESS.
+//
+//go:export goLoadFile2
+//go:nosplit
+func goLoadFile2(self, devPath, bootPolicy uintptr, bufSizePtr *uint64, buf uintptr) uint64 {
+	const efiBufferTooSmall = 0x8000000000000005
+
+	if *bufSizePtr < initrdSize {
+		*bufSizePtr = initrdSize
+		return efiBufferTooSmall
+	}
+	for i := uint64(0); i < initrdSize; i++ {
+		*(*uint8)(unsafe.Pointer(buf + uintptr(i))) =
+			*(*uint8)(unsafe.Pointer(initrdDataPtr + uintptr(i)))
+	}
+	*bufSizePtr = initrdSize
+	return 0
+}
+
 // ----- entry point -----
 
 //go:export _start
@@ -649,7 +685,18 @@ func _start(imageHandle uintptr, st *efiSystemTable) efiStatus {
 
 		initrdDataPtr = lip.imageBase + uintptr(secInitrd.vaddr)
 		initrdSize = uint64(secInitrd.vsize)
-		ourLoadFile2.loadFile = loadFile2Entry
+		ourLoadFile2.loadFile = loadFile2Ptr()
+
+		// Diagnostic: log the resolved callback address — sanity check
+		// that the PC-relative load returned a sensible runtime address
+		// inside our image.
+		writeASCII(co, "  loadFile2 fn   = ")
+		writeHex64(co, uint64(ourLoadFile2.loadFile))
+		writeASCII(co, "\r\n  imageBase     = ")
+		writeHex64(co, uint64(lip.imageBase))
+		writeASCII(co, "\r\n  initrdDataPtr = ")
+		writeHex64(co, uint64(initrdDataPtr))
+		writeASCII(co, "\r\n")
 
 		// First InstallProtocolInterface call creates a handle (because
 		// initrdHandle starts at 0 / NULL) and binds the DevicePath

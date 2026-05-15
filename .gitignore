@@ -38,3 +38,10 @@
 /esp-uki3a-aa64/
 /qemu-uki3a-x64.log
 /qemu-uki3a-aa64.log
+/BOOTAA64.map
+/BOOTAA64-real.EFI
+/BOOTX64-real.EFI
+/esp-real-aa64/
+/esp-real-x64/
+/qemu-real-aa64.log
+/qemu-real-x64.log
