@@ -1,10 +1,13 @@
 # Real-kernel end-to-end test. For each target arch, we:
 #
 #   1. Build a minimal cloud Linux kernel + 310-byte initramfs out of
-#      the sibling go-coff/kernel-build repo, via Docker (so the host
+#      the sibling cloud-boot/kernel repo, via Docker (so the host
 #      doesn't need a cross-toolchain).
-#   2. Build BOOT{X64,AA64}.EFI from this repo.
-#   3. Use go-coff/pec to assemble a UKI = stub + .linux=kernel +
+#   2. Build BOOT{X64,AA64}.EFI from this repo. (The .EFI filenames are
+#      UEFI-spec mandated for the removable-media fallback path, hence
+#      the legacy x64 / aa64 nomenclature — everything else in the repo
+#      uses amd64 / arm64.)
+#   3. Use go-coff/pectl to assemble a UKI = stub + .linux=kernel +
 #      .initrd=cpio.gz + .cmdline=…
 #   4. Boot the UKI under QEMU + OVMF and assert the magic banner
 #      that our /init prints (`GOCOFF-INITRD-OK`) plus the kernel's
@@ -30,29 +33,29 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - arch: aa64
+          - arch: arm64
             qemu: qemu-system-aarch64
             qemu_machine: virt
             qemu_cpu: max
             ovmf_code: /usr/share/AAVMF/AAVMF_CODE.fd
             ovmf_vars_template: /usr/share/AAVMF/AAVMF_VARS.fd
             console: ttyAMA0
-            dockerfile: Dockerfile.aa64
-            initrd_dockerfile: Dockerfile.initrd
+            dockerfile: Dockerfile.arm64
+            initrd_dockerfile: Dockerfile.initrd-arm64
             kernel_artifact: Image
             kernel_in_container: /Image
             stub_out: BOOTAA64.EFI
             uki_out: BOOTAA64-uki.EFI
             qemu_drive: -drive file=fat:rw:esp,format=raw,id=hd0,if=none -device virtio-blk-device,drive=hd0
-          - arch: x64
+          - arch: amd64
             qemu: qemu-system-x86_64
             qemu_machine: q35
             qemu_cpu: max
             ovmf_code: /usr/share/OVMF/OVMF_CODE.fd
             ovmf_vars_template: /usr/share/OVMF/OVMF_VARS.fd
             console: ttyS0
-            dockerfile: Dockerfile.x64
-            initrd_dockerfile: Dockerfile.initrd-x64
+            dockerfile: Dockerfile.amd64
+            initrd_dockerfile: Dockerfile.initrd-amd64
             kernel_artifact: bzImage
             kernel_in_container: /bzImage
             stub_out: BOOTX64.EFI
@@ -63,27 +66,27 @@ jobs:
       TINYGO_VERSION: "0.41.1"
     steps:
       - name: Check out stub
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: stub
 
-      - name: Check out pe (replace target)
-        uses: actions/checkout@v4
+      - name: Check out peln (replace target)
+        uses: actions/checkout@v7
         with:
-          repository: go-coff/pe
-          path: pe
+          repository: go-coff/peln
+          path: peln
 
-      - name: Check out pec
-        uses: actions/checkout@v4
+      - name: Check out pectl
+        uses: actions/checkout@v7
         with:
-          repository: go-coff/pec
-          path: pec
+          repository: go-coff/pectl
+          path: pectl
 
-      - name: Check out kernel-build
-        uses: actions/checkout@v4
+      - name: Check out cloud-boot/kernel
+        uses: actions/checkout@v7
         with:
-          repository: go-coff/kernel-build
-          path: kernel-build
+          repository: cloud-boot/kernel
+          path: kernel
 
       - name: Install host tools
         run: |
@@ -102,30 +105,28 @@ jobs:
           sudo dpkg -i /tmp/tinygo.deb
 
       - name: Set up QEMU (cross-platform docker)
-        # Needed so x86_64 runners can build aarch64 docker images for
-        # the kernel-build container (qemu-user emulation).
+        # Needed so amd64 runners can build arm64 docker images for the
+        # kernel container (qemu-user emulation).
         uses: docker/setup-qemu-action@v3
 
       - name: Build kernel + initramfs (${{ matrix.arch }})
-        working-directory: kernel-build
+        working-directory: kernel
         run: |
           # Build the kernel image and the initramfs as Docker images
           # for the right target arch, then extract the two artefacts.
-          docker_arch=$(case "${{ matrix.arch }}" in aa64) echo arm64 ;; x64) echo amd64 ;; esac)
-
-          docker build --platform "linux/${docker_arch}" \
+          docker build --platform "linux/${{ matrix.arch }}" \
                        -f "${{ matrix.dockerfile }}" \
                        -t go-coff-kernel:${{ matrix.arch }} .
-          docker build --platform "linux/${docker_arch}" \
+          docker build --platform "linux/${{ matrix.arch }}" \
                        -f "${{ matrix.initrd_dockerfile }}" \
                        -t go-coff-initrd:${{ matrix.arch }} .
 
-          docker create --platform "linux/${docker_arch}" \
+          docker create --platform "linux/${{ matrix.arch }}" \
                         --name k go-coff-kernel:${{ matrix.arch }}
           docker cp k:${{ matrix.kernel_in_container }} ./${{ matrix.kernel_artifact }}
           docker rm k
 
-          docker create --platform "linux/${docker_arch}" \
+          docker create --platform "linux/${{ matrix.arch }}" \
                         --name i go-coff-initrd:${{ matrix.arch }}
           docker cp i:/initramfs.cpio.gz ./initramfs.cpio.gz
           docker rm i
@@ -136,16 +137,16 @@ jobs:
         working-directory: stub
         run: task build-${{ matrix.arch }}
 
-      - name: Build pec
-        working-directory: pec
-        run: go build -o "${GITHUB_WORKSPACE}/pec" .
+      - name: Build pectl
+        working-directory: pectl
+        run: go build -o "${GITHUB_WORKSPACE}/pectl" .
 
       - name: Assemble UKI = stub + .linux + .initrd + .cmdline
         run: |
-          "${GITHUB_WORKSPACE}/pec" \
-            --add-section ".linux=${GITHUB_WORKSPACE}/kernel-build/${{ matrix.kernel_artifact }}" \
-            --add-section ".initrd=${GITHUB_WORKSPACE}/kernel-build/initramfs.cpio.gz" \
-            --add-section ".cmdline=<(echo -n 'console=${{ matrix.console }}')" \
+          "${GITHUB_WORKSPACE}/pectl" append \
+            --linux "${GITHUB_WORKSPACE}/kernel/${{ matrix.kernel_artifact }}" \
+            --initrd "${GITHUB_WORKSPACE}/kernel/initramfs.cpio.gz" \
+            --cmdline <(echo -n 'console=${{ matrix.console }}') \
             -o "${GITHUB_WORKSPACE}/${{ matrix.uki_out }}" \
             "${GITHUB_WORKSPACE}/stub/${{ matrix.stub_out }}"
           file "${GITHUB_WORKSPACE}/${{ matrix.uki_out }}"
@@ -180,7 +181,7 @@ jobs:
 
       - name: Upload UKI + log on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: uki-${{ matrix.arch }}-failure
           path: |

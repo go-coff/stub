@@ -14,12 +14,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: [x64, aa64]
+        arch: [amd64, arm64]
     runs-on: ubuntu-latest
     env:
       TINYGO_VERSION: "0.41.1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install host tools (clang, lld, qemu, ovmf, task)
         run: |
@@ -42,15 +42,17 @@ jobs:
 
       - name: Verify it is a PE32+ EFI application (${{ matrix.arch }})
         run: |
-          out=$(case "${{ matrix.arch }}" in x64) echo BOOTX64.EFI ;; aa64) echo BOOTAA64.EFI ;; esac)
-          arch_pattern=$(case "${{ matrix.arch }}" in x64) echo 'x86-64' ;; aa64) echo 'Aarch64' ;; esac)
+          # The .EFI filename is UEFI-spec mandated for the removable-media
+          # fallback path, so it does not match our amd64/arm64 convention.
+          out=$(case "${{ matrix.arch }}" in amd64) echo BOOTX64.EFI ;; arm64) echo BOOTAA64.EFI ;; esac)
+          arch_pattern=$(case "${{ matrix.arch }}" in amd64) echo 'x86-64' ;; arm64) echo 'Aarch64' ;; esac)
           file "$out" | tee /dev/stderr | grep -q "PE32+ executable (EFI application) ${arch_pattern}"
 
       - name: Boot under QEMU and assert the banner is on the serial console (${{ matrix.arch }})
         run: task qemu-test-${{ matrix.arch }}
 
       - name: Upload the EFI binary as an artifact (${{ matrix.arch }})
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: BOOT-${{ matrix.arch }}.EFI
           path: |
@@ -67,7 +69,7 @@ jobs:
     env:
       TINYGO_VERSION: "0.41.1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install host tools (clang, lld, qemu, ovmf, task)
         # No mtools / xorriso: the ESP and ISO are now produced by the
@@ -98,13 +100,13 @@ jobs:
           file stub.iso | tee /dev/stderr | grep -q 'ISO 9660'
 
       - name: Boot the ISO on qemu-system-x86_64 and assert the banner
-        run: task qemu-iso-test-x64
+        run: task qemu-iso-test-amd64
 
       - name: Boot the ISO on qemu-system-aarch64 and assert the banner
-        run: task qemu-iso-test-aa64
+        run: task qemu-iso-test-arm64
 
       - name: Upload the ISO as an artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: stub.iso
           path: stub.iso
