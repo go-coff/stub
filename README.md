@@ -1,3 +1,5 @@
+<p align="center"><img src="https://raw.githubusercontent.com/go-coff/brand/main/social/go-coff.png" alt="go-coff/stub" width="720"></p>
+
 # go-coff/stub
 
 [![CI](https://github.com/go-coff/stub/actions/workflows/ci.yml/badge.svg)](https://github.com/go-coff/stub/actions/workflows/ci.yml)
@@ -32,34 +34,34 @@ lines of PE walking and protocol calls, that's an acceptable trade.
 ## Building
 
 ```sh
-# Per-arch primitives (substitute x64 or aa64).
-task build-x64       # main-x64.o (TinyGo) + thunk-x64.o (clang) → BOOTX64.EFI
-task qemu-x64        # boot under OVMF; Ctrl-A x to quit
-task qemu-test-x64   # boot, grep the serial log for the banner, fail if absent
+# Per-arch primitives (substitute amd64 or arm64).
+task build-amd64       # main-amd64.o (TinyGo) + thunk-amd64.o (clang) → BOOTX64.EFI
+task qemu-amd64        # boot under OVMF; Ctrl-A x to quit
+task qemu-test-amd64   # boot, grep the serial log for the banner, fail if absent
 
-task build-aa64      # same pipeline for aarch64 → BOOTAA64.EFI
-task qemu-aa64
-task qemu-test-aa64
+task build-arm64       # same pipeline for arm64 → BOOTAA64.EFI
+task qemu-arm64
+task qemu-test-arm64
 
 # Aggregates that fan out over both architectures.
-task build           # build-x64 + build-aa64
-task qemu-test       # qemu-test-x64 + qemu-test-aa64
+task build           # build-amd64 + build-arm64
+task qemu-test       # qemu-test-amd64 + qemu-test-arm64
 
 # Single multi-arch ISO that boots on x86_64 AND aarch64.
 task iso             # → stub.iso (also esp.img, the embedded FAT image)
-task qemu-iso-x64    # boot stub.iso under qemu-system-x86_64
-task qemu-iso-aa64   # boot stub.iso under qemu-system-aarch64
-task qemu-iso-test   # qemu-iso-test-x64 + qemu-iso-test-aa64
+task qemu-iso-amd64   # boot stub.iso under qemu-system-x86_64
+task qemu-iso-arm64   # boot stub.iso under qemu-system-aarch64
+task qemu-iso-test   # qemu-iso-test-amd64 + qemu-iso-test-arm64
 
 # Phase-3 self-load smoke test (appends BOOT*.EFI as its own .linux,
 # then boots the result; the outer chain-loads the inner via LoadImage
 # / StartImage and the inner reports "no .linux, skipping"). Requires
 # a sibling checkout of github.com/go-coff/pec at ../pec.
-task uki-x64         # → BOOTX64-uki.EFI
-task uki-aa64        # → BOOTAA64-uki.EFI
-task uki-test-x64    # boot BOOTX64-uki.EFI, assert banner appears 2×
-task uki-test-aa64   # boot BOOTAA64-uki.EFI, assert banner appears 2×
-task uki-test        # uki-test-x64 + uki-test-aa64
+task uki-amd64         # → BOOTX64-uki.EFI
+task uki-arm64        # → BOOTAA64-uki.EFI
+task uki-test-amd64    # boot BOOTX64-uki.EFI, assert banner appears 2×
+task uki-test-arm64   # boot BOOTAA64-uki.EFI, assert banner appears 2×
+task uki-test        # uki-test-amd64 + uki-test-arm64
 
 task clean
 ```
@@ -143,8 +145,8 @@ on aarch64 (args in X0..X7). But the firmware-side function pointer
 needs the args in a different position from what TinyGo gave us,
 because we pass the fn pointer as the **first** Go arg (so it lands
 in the first register that should otherwise hold the first EFI arg).
-**One asm thunk per arity per arch** ([`thunk-x64.S`](thunk-x64.S),
-[`thunk-aa64.S`](thunk-aa64.S)) handles the shuffle: slide the fn
+**One asm thunk per arity per arch** ([`thunk-amd64.S`](thunk-amd64.S),
+[`thunk-arm64.S`](thunk-arm64.S)) handles the shuffle: slide the fn
 pointer out of RCX/X0 into a scratch register and slide every other
 arg one slot left, then `call`/`blr`.
 
@@ -247,11 +249,11 @@ PC=0 inside DxeCore.
 ```text
 stub/
 ├── main.go                EFI structs (uintptr method slots) + _start + banner
-├── thunk-x64.S            MS x64 thunks: efiCall1..5 (RCX/RDX/R8/R9 shuffle)
-├── thunk-aa64.S           AAPCS64 thunks: efiCall1..5 (X0..X5 shuffle)
+├── thunk-amd64.S            MS x64 thunks: efiCall1..5 (RCX/RDX/R8/R9 shuffle)
+├── thunk-arm64.S           AAPCS64 thunks: efiCall1..5 (X0..X5 shuffle)
 ├── targets/
-│   ├── uefi-x64.json      TinyGo target: x86_64-pc-windows-gnu + freestanding
-│   └── uefi-aa64.json     TinyGo target: aarch64-pc-windows-gnu + freestanding
+│   ├── uefi-amd64.json      TinyGo target: x86_64-pc-windows-gnu + freestanding
+│   └── uefi-arm64.json     TinyGo target: aarch64-pc-windows-gnu + freestanding
 ├── cmd/
 │   ├── mkesp/             FAT16 ESP writer; replaces mtools at build time
 │   └── mkiso/             ISO 9660 + El Torito UEFI writer; replaces xorriso
@@ -261,7 +263,7 @@ stub/
 ├── renovate.json
 ├── LICENSE                BSD 3-Clause, "The go-coff Authors"
 └── .github/workflows/
-    └── ci.yml             matrix [x64, aa64] + a single-ISO job that
+    └── ci.yml             matrix [amd64, arm64] + a single-ISO job that
                            boots stub.iso on both qemu-system-x86_64
                            and qemu-system-aarch64
 ```
@@ -273,14 +275,14 @@ stub/
 - **Phase 2** ✅ — locate our own PE image at runtime via
   `EFI_LOADED_IMAGE_PROTOCOL` (the firmware tells us where it loaded
   us), walk the COFF header and print every section's name, VA and
-  size. Any payload a `pec --add-section` build-time pass injects
+  size. Any payload a `pec append --section` build-time pass injects
   shows up here verbatim. Works on both archs.
 - **Phase 3 (basic)** ✅ — if a `.linux` section is present, chain-load
   it via `BootServices.LoadImage` + `StartImage`. On aarch64 this is
   the **full UKI handoff** because vmlinuz is itself a PE32+ EFI app —
   drop in a real `.linux=vmlinuz` and the kernel boots. On x86_64 the
   same path works for any EFI app appended as `.linux`. Smoke-tested
-  via `task uki-test-{x64,aa64}` which appends our own `BOOT*.EFI` to
+  via `task uki-test-{amd64,arm64}` which appends our own `BOOT*.EFI` to
   a copy of itself, boots, and asserts the banner appears **twice**
   (outer + inner) — see the recipe in [Taskfile.yaml](Taskfile.yaml).
 - **Phase 3 (rest)** — for a real raw bzImage on x86_64, parse the

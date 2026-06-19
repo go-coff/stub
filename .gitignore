@@ -1,47 +1,61 @@
 .DS_Store
 /.task/
 
-# Build artefacts per arch (x86_64).
-/main-x64.o
-/thunk-x64.o
+# Build artefacts per arch (amd64).
+/main-amd64.o
+/thunk-amd64.o
 /BOOTX64.EFI
-/esp-x64/
-/ovmf-x64-vars.fd
-/qemu-x64.log
+/esp-amd64/
+/ovmf-amd64-vars.fd
+/qemu-amd64.log
 
-# Build artefacts per arch (aarch64).
-/main-aa64.o
-/thunk-aa64.o
+# Build artefacts per arch (arm64).
+/main-arm64.o
+/thunk-arm64.o
 /BOOTAA64.EFI
-/esp-aa64/
-/ovmf-aa64-vars.fd
-/qemu-aa64.log
+/esp-arm64/
+/ovmf-arm64-vars.fd
+/qemu-arm64.log
 
 # Multi-arch ISO artefacts.
 /esp.img
 /stub.iso
-/qemu-iso-x64.log
-/qemu-iso-aa64.log
+/qemu-iso-amd64.log
+/qemu-iso-arm64.log
 
 # Phase-3 self-load smoke test artefacts.
 /BOOTX64-uki.EFI
 /BOOTAA64-uki.EFI
-/esp-uki/
-/esp-uki-x64/
-/qemu-uki-x64.log
-/qemu-uki-aa64.log
+/esp-uki-amd64/
+/esp-uki-arm64/
+/qemu-uki-amd64.log
+/qemu-uki-arm64.log
 
 # Phase-3a UKI section-discovery smoke test artefacts.
 /BOOTX64-uki3a.EFI
 /BOOTAA64-uki3a.EFI
-/esp-uki3a-x64/
-/esp-uki3a-aa64/
-/qemu-uki3a-x64.log
-/qemu-uki3a-aa64.log
+/esp-uki3a-amd64/
+/esp-uki3a-arm64/
+/qemu-uki3a-amd64.log
+/qemu-uki3a-arm64.log
+
+# Real-kernel e2e artefacts (kernel + initrd + UKI).
 /BOOTAA64.map
 /BOOTAA64-real.EFI
 /BOOTX64-real.EFI
-/esp-real-aa64/
-/esp-real-x64/
-/qemu-real-aa64.log
-/qemu-real-x64.log
+/esp-real-amd64/
+/esp-real-arm64/
+/qemu-real-amd64.log
+/qemu-real-arm64.log
+
+# SecureBoot signing artefacts.
+/sb.key
+/sb.crt
+/BOOTX64-signed.EFI
+/BOOTAA64-signed.EFI
+*.EFI
+*.o
+*.fd
+*.log
+esp-*/
+BOOT*.EFI

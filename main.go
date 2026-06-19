@@ -10,7 +10,7 @@
 // All EFI method slots are declared as `uintptr` so the Go struct layout
 // matches the firmware-side C layout byte-for-byte (a Go `func` value is a
 // fat pointer and would shift every subsequent field by 8 bytes). The
-// indirect calls go through asm thunks in thunk-{x64,aa64}.S that translate
+// indirect calls go through asm thunks in thunk-{amd64,arm64}.S that translate
 // from TinyGo's external-call register layout to the Microsoft x64 / AAPCS64
 // calling convention.
 package main
@@ -230,7 +230,7 @@ var linuxInitrdGUID = efiGUID{
 	0xAC, 0x74, 0xCA, 0x55, 0x52, 0x31, 0xCC, 0x68,
 }
 
-// ----- Thunks (see thunk-{x64,aa64}.S) -----
+// ----- Thunks (see thunk-{amd64,arm64}.S) -----
 
 //go:linkname efiCall1 efiCall1
 func efiCall1(fn, a uintptr) uint64
@@ -284,6 +284,23 @@ var (
 	childImageHandle uintptr
 )
 
+// Phase 3c state. The child kernel reads its command line through its own
+// EFI_LOADED_IMAGE_PROTOCOL.LoadOptions, a NUL-terminated UTF-16LE buffer
+// owned by us — the firmware does not copy it. cmdlineUTF16 therefore must
+// live in BSS so the pointer stays valid past StartImage / ExitBootServices,
+// and so HandleProtocol's OUT slot (childLIPHolder) does not get
+// heap-allocated by TinyGo's escape analysis.
+//
+// 1024 UTF-16 code units = 2048 bytes — comfortably above the typical
+// kernel cmdline cap (CONFIG_CMDLINE_SIZE defaults to 256 on x86_64 and
+// 2048 on arm64). Longer cmdlines are silently truncated rather than
+// aborted: a too-long cmdline is a build-time issue, not worth blocking
+// the boot for.
+var (
+	childLIPHolder uintptr
+	cmdlineUTF16   [1024]uint16
+)
+
 // ukiSection records where one of the named UKI payload sections lives
 // inside our loaded image. `vaddr` is relative to imageBase: the bytes
 // of the section are accessible at `imageBase + vaddr` for `vsize` bytes.
@@ -325,6 +342,38 @@ func writeASCII(co *efiSimpleTextOutput, s string) {
 	}
 	lineBuf[n] = 0
 	writeUTF16(co, &lineBuf[0])
+}
+
+// dbg prints s only when the `stubdebug` build tag is set (see
+// debug_off.go / debug_on.go). With debug=false the body is dead code
+// the compiler strips, so a quiet build pays zero runtime cost for the
+// hundreds of phase-trace messages scattered through _start.
+func dbg(co *efiSimpleTextOutput, s string) {
+	if debug {
+		writeASCII(co, s)
+	}
+}
+
+// dbgHex64 is the writeHex64 counterpart of dbg — gated identically so a
+// quiet build never emits an address or size.
+func dbgHex64(co *efiSimpleTextOutput, n uint64) {
+	if debug {
+		writeHex64(co, n)
+	}
+}
+
+// dbgDec and dbgUTF16 mirror dbgHex64 / dbg for the two remaining
+// formatting primitives. Same gate, same zero-cost-when-quiet rationale.
+func dbgDec(co *efiSimpleTextOutput, n uint32) {
+	if debug {
+		writeDec(co, n)
+	}
+}
+
+func dbgUTF16(co *efiSimpleTextOutput, p *uint16) {
+	if debug {
+		writeUTF16(co, p)
+	}
 }
 
 // writeHex64 prints "0x" + 16 hex digits (zero-padded) for a uint64.
@@ -427,9 +476,9 @@ func walkSections(co *efiSimpleTextOutput, base uintptr) {
 	// Section table sits right after the optional header.
 	secTable := coff + 20 + uintptr(sizeOfOpt)
 
-	writeASCII(co, "  sections: ")
-	writeDec(co, uint32(numSections))
-	writeASCII(co, "\r\n")
+	dbg(co, "  sections: ")
+	dbgDec(co, uint32(numSections))
+	dbg(co, "\r\n")
 
 	for i := uint16(0); i < numSections; i++ {
 		s := secTable + uintptr(i)*40
@@ -449,13 +498,13 @@ func walkSections(co *efiSimpleTextOutput, base uintptr) {
 		vsize := peU32(s, 8)
 		vaddr := peU32(s, 12)
 
-		writeASCII(co, "    ")
-		writeUTF16(co, &nameBuf[0])
-		writeASCII(co, "  va=")
-		writeHex64(co, uint64(vaddr))
-		writeASCII(co, "  size=")
-		writeHex64(co, uint64(vsize))
-		writeASCII(co, "\r\n")
+		dbg(co, "    ")
+		dbgUTF16(co, &nameBuf[0])
+		dbg(co, "  va=")
+		dbgHex64(co, uint64(vaddr))
+		dbg(co, "  size=")
+		dbgHex64(co, uint64(vsize))
+		dbg(co, "\r\n")
 
 		// Record `.linux` for the phase-3 kernel handoff. Match the
 		// 8-byte field in nameBuf rather than building a Go string —
@@ -490,17 +539,17 @@ func walkSections(co *efiSimpleTextOutput, base uintptr) {
 // reportUKISection prints "<name>: <state>" for one of the five UKI
 // payload sections. The state is either "missing" or "va=… size=…".
 func reportUKISection(co *efiSimpleTextOutput, name string, s ukiSection) {
-	writeASCII(co, "    ")
-	writeASCII(co, name)
+	dbg(co, "    ")
+	dbg(co, name)
 	if !s.found {
-		writeASCII(co, ": missing\r\n")
+		dbg(co, ": missing\r\n")
 		return
 	}
-	writeASCII(co, ": va=")
-	writeHex64(co, uint64(s.vaddr))
-	writeASCII(co, " size=")
-	writeHex64(co, uint64(s.vsize))
-	writeASCII(co, "\r\n")
+	dbg(co, ": va=")
+	dbgHex64(co, uint64(s.vaddr))
+	dbg(co, " size=")
+	dbgHex64(co, uint64(s.vsize))
+	dbg(co, "\r\n")
 }
 
 // dumpASCIISection prints up to lineBuf-4 wide chars of `s`'s body,
@@ -536,9 +585,9 @@ func dumpASCIISection(co *efiSimpleTextOutput, imageBase uintptr, s ukiSection) 
 		out += 3
 	}
 	lineBuf[out] = 0
-	writeASCII(co, "      content: \"")
-	writeUTF16(co, &lineBuf[0])
-	writeASCII(co, "\"\r\n")
+	dbg(co, "      content: \"")
+	dbgUTF16(co, &lineBuf[0])
+	dbg(co, "\"\r\n")
 }
 
 // reportUKI prints the presence/absence of each UKI payload section and
@@ -546,7 +595,7 @@ func dumpASCIISection(co *efiSimpleTextOutput, imageBase uintptr, s ukiSection) 
 // three are short ASCII text in any real UKI). Run after walkSections
 // has populated the secXxx package-level vars.
 func reportUKI(co *efiSimpleTextOutput, imageBase uintptr) {
-	writeASCII(co, "  UKI sections:\r\n")
+	dbg(co, "  UKI sections:\r\n")
 	reportUKISection(co, ".linux  ", secLinux)
 	reportUKISection(co, ".initrd ", secInitrd)
 	reportUKISection(co, ".cmdline", secCmdline)
@@ -563,15 +612,15 @@ func reportUKI(co *efiSimpleTextOutput, imageBase uintptr) {
 			found++
 		}
 	}
-	writeASCII(co, "  UKI payload sections found: ")
-	writeDec(co, found)
-	writeASCII(co, "/5\r\n")
+	dbg(co, "  UKI payload sections found: ")
+	dbgDec(co, found)
+	dbg(co, "/5\r\n")
 }
 
 // ----- LoadFile2 callback (phase 3b, Go-side implementation) -----
 
 // goLoadFile2 implements EFI_LOAD_FILE2_PROTOCOL.LoadFile for our
-// embedded `.initrd`. The asm shim in thunk-{x64,aa64}.S tail-calls
+// embedded `.initrd`. The asm shim in thunk-{amd64,arm64}.S tail-calls
 // here — TinyGo's `//go:export` emits the function with the platform
 // ABI (MS x64 / AAPCS64), which is what the firmware uses.
 //
@@ -614,8 +663,8 @@ func goLoadFile2(self, devPath, bootPolicy uintptr, bufSizePtr *uint64, buf uint
 func _start(imageHandle uintptr, st *efiSystemTable) efiStatus {
 	co := st.conOut
 
-	writeASCII(co, "Hello, UEFI from TinyGo!\r\n")
-	writeASCII(co, "Phase 2 - self-PE inspection\r\n")
+	dbg(co, "Hello, UEFI from TinyGo!\r\n")
+	dbg(co, "Phase 2 - self-PE inspection\r\n")
 
 	// Locate our own image in memory via the loaded-image protocol.
 	// HandleProtocol(handle, &guid, &out) is the 3-arg shorthand for
@@ -635,16 +684,16 @@ func _start(imageHandle uintptr, st *efiSystemTable) efiStatus {
 	}
 
 	lip := (*efiLoadedImageProtocol)(unsafe.Pointer(loadedImageHolder))
-	writeASCII(co, "  imageBase = ")
-	writeHex64(co, uint64(lip.imageBase))
-	writeASCII(co, "\r\n  imageSize = ")
-	writeHex64(co, lip.imageSize)
-	writeASCII(co, "\r\n")
+	dbg(co, "  imageBase = ")
+	dbgHex64(co, uint64(lip.imageBase))
+	dbg(co, "\r\n  imageSize = ")
+	dbgHex64(co, lip.imageSize)
+	dbg(co, "\r\n")
 
 	walkSections(co, lip.imageBase)
 
 	// Sentinel the test grep can lock onto.
-	writeASCII(co, "PHASE2-DONE\r\n")
+	dbg(co, "PHASE2-DONE\r\n")
 
 	// ----- Phase 3a — UKI section discovery -----
 	//
@@ -652,9 +701,9 @@ func _start(imageHandle uintptr, st *efiSystemTable) efiStatus {
 	// `.osrel` / `.uname` section into the secXxx package-level vars.
 	// reportUKI prints the presence table and dumps the body of the
 	// short ASCII sections.
-	writeASCII(co, "Phase 3a - UKI section discovery\r\n")
+	dbg(co, "Phase 3a - UKI section discovery\r\n")
 	reportUKI(co, lip.imageBase)
-	writeASCII(co, "PHASE3A-DONE\r\n")
+	dbg(co, "PHASE3A-DONE\r\n")
 
 	// ----- Phase 3b — expose .initrd via EFI_LOAD_FILE2_PROTOCOL -----
 	//
@@ -662,11 +711,11 @@ func _start(imageHandle uintptr, st *efiSystemTable) efiStatus {
 	// whose device path is a MEDIA_VENDOR node carrying the
 	// LINUX_EFI_INITRD_MEDIA_GUID. We build exactly such a device path,
 	// publish a LoadFile2 protocol whose entry point is implemented in
-	// asm (see loadFile2 in thunk-{x64,aa64}.S), and install both on a
+	// asm (see loadFile2 in thunk-{amd64,arm64}.S), and install both on a
 	// fresh handle. The asm callback reads `initrdDataPtr` / `initrdSize`
 	// — package-level vars we populate just below — to serve the bytes.
 	if secInitrd.found && secInitrd.vsize > 0 {
-		writeASCII(co, "Phase 3b - initrd LoadFile2\r\n")
+		dbg(co, "Phase 3b - initrd LoadFile2\r\n")
 
 		// MEDIA_DEVICE_PATH (4) / MEDIA_VENDOR (3), length 20 (4-byte
 		// header + 16-byte GUID).
@@ -690,13 +739,13 @@ func _start(imageHandle uintptr, st *efiSystemTable) efiStatus {
 		// Diagnostic: log the resolved callback address — sanity check
 		// that the PC-relative load returned a sensible runtime address
 		// inside our image.
-		writeASCII(co, "  loadFile2 fn   = ")
-		writeHex64(co, uint64(ourLoadFile2.loadFile))
-		writeASCII(co, "\r\n  imageBase     = ")
-		writeHex64(co, uint64(lip.imageBase))
-		writeASCII(co, "\r\n  initrdDataPtr = ")
-		writeHex64(co, uint64(initrdDataPtr))
-		writeASCII(co, "\r\n")
+		dbg(co, "  loadFile2 fn   = ")
+		dbgHex64(co, uint64(ourLoadFile2.loadFile))
+		dbg(co, "\r\n  imageBase     = ")
+		dbgHex64(co, uint64(lip.imageBase))
+		dbg(co, "\r\n  initrdDataPtr = ")
+		dbgHex64(co, uint64(initrdDataPtr))
+		dbg(co, "\r\n")
 
 		// First InstallProtocolInterface call creates a handle (because
 		// initrdHandle starts at 0 / NULL) and binds the DevicePath
@@ -726,13 +775,13 @@ func _start(imageHandle uintptr, st *efiSystemTable) efiStatus {
 			for {
 			}
 		}
-		writeASCII(co, "  initrd handle = ")
-		writeHex64(co, uint64(initrdHandle))
-		writeASCII(co, "\r\n  initrd size = ")
-		writeHex64(co, initrdSize)
-		writeASCII(co, "\r\nPHASE3B-DONE\r\n")
+		dbg(co, "  initrd handle = ")
+		dbgHex64(co, uint64(initrdHandle))
+		dbg(co, "\r\n  initrd size = ")
+		dbgHex64(co, initrdSize)
+		dbg(co, "\r\nPHASE3B-DONE\r\n")
 	} else {
-		writeASCII(co, "PHASE3B-SKIPPED (no .initrd section)\r\n")
+		dbg(co, "PHASE3B-SKIPPED (no .initrd section)\r\n")
 	}
 
 	// ----- Phase 3 (chain-load) -----
@@ -752,12 +801,12 @@ func _start(imageHandle uintptr, st *efiSystemTable) efiStatus {
 		}
 	}
 
-	writeASCII(co, "Phase 3 - kernel handoff\r\n")
-	writeASCII(co, "  .linux va=")
-	writeHex64(co, uint64(dotLinuxVA))
-	writeASCII(co, "  size=")
-	writeHex64(co, uint64(dotLinuxSize))
-	writeASCII(co, "\r\n")
+	dbg(co, "Phase 3 - kernel handoff\r\n")
+	dbg(co, "  .linux va=")
+	dbgHex64(co, uint64(dotLinuxVA))
+	dbg(co, "  size=")
+	dbgHex64(co, uint64(dotLinuxSize))
+	dbg(co, "\r\n")
 
 	status = efiCall6(bs.loadImage,
 		0,                                    // BootPolicy = FALSE: the SourceBuffer holds the image
@@ -774,9 +823,68 @@ func _start(imageHandle uintptr, st *efiSystemTable) efiStatus {
 		for {
 		}
 	}
-	writeASCII(co, "  child image handle = ")
-	writeHex64(co, uint64(childImageHandle))
-	writeASCII(co, "\r\nStartImage...\r\n")
+	dbg(co, "  child image handle = ")
+	dbgHex64(co, uint64(childImageHandle))
+	dbg(co, "\r\n")
+
+	// ----- Phase 3c — propagate .cmdline to the child kernel -----
+	//
+	// Linux's EFI stub reads its command line from its own loaded-image
+	// protocol — image->load_options (UTF-16LE) + image->load_options_size
+	// (BYTES, sized for that UTF-16 buffer, NUL terminator optional). The
+	// firmware does NOT carry a parent stub's .cmdline section across
+	// LoadImage; we have to fetch the child's loaded-image protocol and
+	// patch its slots ourselves.
+	//
+	// We widen the ASCII section in-place (ASCII is a subset of UTF-16LE),
+	// trim a trailing newline if `pec` appended one, and NUL-terminate.
+	// Skipping silently when no .cmdline section is present matches the
+	// pre-fix behaviour for unloaded leaves.
+	if secCmdline.found && secCmdline.vsize > 0 {
+		dbg(co, "Phase 3c - propagate .cmdline to child LoadOptions\r\n")
+
+		raw := secCmdline.vsize
+		maxChars := uint32(len(cmdlineUTF16) - 1) // reserve NUL slot
+		if raw > maxChars {
+			raw = maxChars
+		}
+		for raw > 0 {
+			c := peByte(lip.imageBase, uintptr(secCmdline.vaddr)+uintptr(raw-1))
+			if c != 0 && c != '\n' && c != '\r' {
+				break
+			}
+			raw--
+		}
+		for i := uint32(0); i < raw; i++ {
+			cmdlineUTF16[i] = uint16(peByte(lip.imageBase, uintptr(secCmdline.vaddr)+uintptr(i)))
+		}
+		cmdlineUTF16[raw] = 0
+
+		status = efiCall3(bs.handleProtocol,
+			childImageHandle,
+			uintptr(unsafe.Pointer(&loadedImageGUID)),
+			uintptr(unsafe.Pointer(&childLIPHolder)))
+		if status != efiSuccess {
+			// Soft-fail: the kernel will boot with an empty cmdline,
+			// which is usually still useful for diagnostics. Log and
+			// continue rather than spin forever.
+			writeASCII(co, "  child HandleProtocol(LoadedImage) failed: ")
+			writeHex64(co, status)
+			writeASCII(co, " — booting without cmdline\r\n")
+		} else {
+			childLip := (*efiLoadedImageProtocol)(unsafe.Pointer(childLIPHolder))
+			childLip.loadOptions = uintptr(unsafe.Pointer(&cmdlineUTF16[0]))
+			// Include the trailing NUL in the byte count; Linux tolerates
+			// either form but systemd-stub conventions favour "with NUL".
+			childLip.loadOptionsSize = (raw + 1) * 2
+			dbg(co, "  child cmdline bytes = ")
+			dbgHex64(co, uint64(childLip.loadOptionsSize))
+			dbg(co, "\r\n")
+		}
+		dbg(co, "PHASE3C-DONE\r\n")
+	}
+
+	dbg(co, "StartImage...\r\n")
 
 	// StartImage transfers control. On the happy path it does not return.
 	// On failure (a kernel that exits without ExitBootServices, or any

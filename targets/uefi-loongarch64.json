@@ -1,0 +1,20 @@
+{
+    "llvm-target": "loongarch64-pc-windows-gnu",
+    "cpu":         "generic-la64",
+    "features":    "+f,+d,+lsx",
+    "build-tags":  ["uefi", "tinygo.uefi"],
+    "goos":        "linux",
+    "goarch":      "loong64",
+    "linker":      "ld.lld",
+    "rtlib":       "compiler-rt",
+    "libc":        "",
+    "gc":          "leaking",
+    "scheduler":   "none",
+    "default-stack-size": 32768,
+    "cflags": [
+        "-ffreestanding"
+    ],
+    "_comment_goos": "Go's stdlib has no windows/loong64 combination, so we use goos=linux to keep TinyGo's runtime happy and rely on the llvm-target / linker steps to produce PE32+ output. Functionally this is fine: TinyGo with gc=leaking + scheduler=none + libc=\"\" never touches libc or syscalls.",
+    "_comment_llvm_triple": "loongarch64-pc-windows-gnu makes LLVM emit COFF/PE relocations rather than ELF. lld-link cannot then stitch the final BOOTLOONGARCH64.EFI (no /machine:loongarch64 in the COFF driver) — but go-coff/peln (`pectl link --machine loongarch64 …`) can.",
+    "_comment_features": "+f,+d enables single/double-precision FP (mandatory for LP64D). +lsx enables 128-bit SIMD (Loongson SIMD eXtension) — present on every la464+ CPU since the architecture's launch."
+}

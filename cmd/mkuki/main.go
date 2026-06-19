@@ -1,6 +1,6 @@
 // mkuki builds a test UKI by taking a freshly-linked BOOTxxx.EFI and
-// using github.com/go-coff/pe to append a fixed set of UKI payload
-// sections. It is meant for the phase-3a integration test: produces a
+// using github.com/go-coff/peln/appender to append a fixed set of UKI
+// payload sections. It is meant for the phase-3a integration test: produces a
 // stub variant where reportUKI can actually find .cmdline / .osrel /
 // .uname content and prove the section discovery works end-to-end.
 //
@@ -16,7 +16,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/go-coff/pe"
+	"github.com/go-coff/peln/appender"
 )
 
 func main() {
@@ -33,21 +33,21 @@ func main() {
 	// Fixed test payloads. The body of each is short enough to fit
 	// inside the stub's lineBuf at phase-3a print time, which keeps the
 	// "content: …" lines fully visible without the `…` truncation.
-	sections := []pe.Section{
+	sections := []appender.Section{
 		{
 			Name:            ".cmdline",
 			Data:            []byte("console=ttyS0 quiet rw"),
-			Characteristics: pe.DefaultCharacteristics,
+			Characteristics: appender.DefaultCharacteristics,
 		},
 		{
 			Name:            ".osrel",
 			Data:            []byte("ID=go-coff-test\nVERSION_ID=0\nPRETTY_NAME=\"go-coff test UKI\"\n"),
-			Characteristics: pe.DefaultCharacteristics,
+			Characteristics: appender.DefaultCharacteristics,
 		},
 		{
 			Name:            ".uname",
 			Data:            []byte("6.10.0-test"),
-			Characteristics: pe.DefaultCharacteristics,
+			Characteristics: appender.DefaultCharacteristics,
 		},
 		{
 			// Fixed test pattern. The phase-3b LoadFile2 callback in the
@@ -58,11 +58,11 @@ func main() {
 			// it to the serial console.
 			Name:            ".initrd",
 			Data:            []byte("GOCOFFINITRD"),
-			Characteristics: pe.DefaultCharacteristics,
+			Characteristics: appender.DefaultCharacteristics,
 		},
 	}
 
-	res, err := pe.Append(stub, sections)
+	res, err := appender.Append(stub, sections)
 	must(err)
 	must(os.WriteFile(out, res, 0o644))
 }

@@ -1,0 +1,19 @@
+{
+    "llvm-target": "riscv64-pc-windows-gnu",
+    "cpu":         "generic-rv64",
+    "features":    "+a,+c,+d,+f,+m,+relax,+zicsr,+zifencei",
+    "build-tags":  ["uefi", "tinygo.uefi"],
+    "goos":        "linux",
+    "goarch":      "riscv64",
+    "linker":      "ld.lld",
+    "rtlib":       "compiler-rt",
+    "libc":        "",
+    "gc":          "leaking",
+    "scheduler":   "none",
+    "default-stack-size": 32768,
+    "cflags": [
+        "-ffreestanding"
+    ],
+    "_comment_goos": "Go's stdlib has no windows/riscv64 combination, so we use goos=linux to keep TinyGo's runtime happy and rely on the llvm-target / linker steps to produce PE32+ output. Functionally this is fine: TinyGo with gc=leaking + scheduler=none + libc=\"\" never touches libc or syscalls.",
+    "_comment_llvm_triple": "riscv64-pc-windows-gnu makes LLVM emit COFF/PE relocations rather than ELF, which is what lld-link expects when stitching the final BOOTRISCV64.EFI. compiler-rt builds because the MinGW define path is taken."
+}

@@ -1,20 +1,50 @@
 version: '3'
 
 vars:
-  X64_OUT:    BOOTX64.EFI
-  AA64_OUT:   BOOTAA64.EFI
-  X64_TARGET: targets/uefi-x64.json
-  AA64_TARGET: targets/uefi-aa64.json
+  # The final .EFI filenames are UEFI-spec mandated for the removable-
+  # media fallback path on each architecture (\EFI\BOOT\BOOT<ARCH>.EFI).
+  # Firmware will not find anything renamed away from these.
+  AMD64_OUT:          BOOTX64.EFI
+  ARM64_OUT:          BOOTAA64.EFI
+  RISCV64_OUT:        BOOTRISCV64.EFI
+  LOONGARCH64_OUT:    BOOTLOONGARCH64.EFI
+  AMD64_TARGET:       targets/uefi-amd64.json
+  ARM64_TARGET:       targets/uefi-arm64.json
+  RISCV64_TARGET:     targets/uefi-riscv64.json
+  LOONGARCH64_TARGET: targets/uefi-loongarch64.json
 
-  # Path to a local checkout of go-coff/pec, used by the phase-3 smoke
-  # tests to append a `.linux` section. Override via the PEC env var to
+  # Apple's bundled clang ships without the RISC-V or LoongArch
+  # backends ("No available targets are compatible with triple
+  # riscv64-…"). The Homebrew LLVM bottle does include them, so the
+  # riscv64 / loongarch64 thunks pick the explicit path below —
+  # override CLANG_RISCV / CLANG_LOONGARCH via env if your toolchain
+  # lives elsewhere.
+  CLANG_RISCV:     '{{.CLANG_RISCV     | default "/opt/homebrew/opt/llvm/bin/clang"}}'
+  CLANG_LOONGARCH: '{{.CLANG_LOONGARCH | default "/opt/homebrew/opt/llvm/bin/clang"}}'
+
+  # Path to a local checkout of go-coff/pectl, used by the phase-3 smoke
+  # tests to append a `.linux` section. Override via the PECTL env var to
   # point at a different checkout (or use `go install` and drop the path
   # by hand-editing the cmds).
-  PEC: ../pec
+  PECTL: ../pectl
+
+  # Build tags forwarded to tinygo for the stub itself. Default keeps the
+  # phase-trace sentinels (`Hello, UEFI from TinyGo!`, `PHASE2-DONE`, …)
+  # because the smoke tests below grep for them. Downstream consumers
+  # (e.g. cloud-boot/uki) that want a silent boot rebuild with
+  #   STUB_TAGS="" task link-arm64
+  # — see main.go's dbg() helper and debug_{off,on}.go for what the tag
+  # actually toggles.
+  # NOTE: do NOT use `{{.STUB_TAGS | default "stubdebug"}}` here — the Go
+  # template `default` filter treats empty string as "unset" and overrides
+  # it, which means `STUB_TAGS="" task link-arm64` would silently re-enable
+  # the trace tag. Setting the literal default lets CLI overrides win,
+  # including the explicit-empty case.
+  STUB_TAGS: stubdebug
 
   # OVMF lookup. The first matching file wins; macOS / Homebrew QEMU and
   # Linux distros put OVMF in different places.
-  OVMF_X64_CODE:
+  OVMF_AMD64_CODE:
     sh: |
       for p in /opt/homebrew/Cellar/qemu/*/share/qemu/edk2-x86_64-code.fd \
                /usr/share/OVMF/OVMF_CODE.fd \
@@ -22,7 +52,7 @@ vars:
                /usr/share/edk2/x64/OVMF_CODE.fd ; do
         [ -f "$p" ] && echo "$p" && exit 0
       done
-  OVMF_X64_VARS_TEMPLATE:
+  OVMF_AMD64_VARS_TEMPLATE:
     sh: |
       for p in /opt/homebrew/Cellar/qemu/*/share/qemu/edk2-i386-vars.fd \
                /usr/share/OVMF/OVMF_VARS.fd \
@@ -30,7 +60,7 @@ vars:
                /usr/share/edk2/x64/OVMF_VARS.fd ; do
         [ -f "$p" ] && echo "$p" && exit 0
       done
-  OVMF_AA64_CODE:
+  OVMF_ARM64_CODE:
     sh: |
       for p in /opt/homebrew/Cellar/qemu/*/share/qemu/edk2-aarch64-code.fd \
                /usr/share/AAVMF/AAVMF_CODE.fd \
@@ -38,7 +68,7 @@ vars:
                /usr/share/edk2/aarch64/QEMU_EFI.fd ; do
         [ -f "$p" ] && echo "$p" && exit 0
       done
-  OVMF_AA64_VARS_TEMPLATE:
+  OVMF_ARM64_VARS_TEMPLATE:
     sh: |
       for p in /opt/homebrew/Cellar/qemu/*/share/qemu/edk2-arm-vars.fd \
                /usr/share/AAVMF/AAVMF_VARS.fd \
@@ -54,28 +84,28 @@ tasks:
       - task --list-all
     silent: true
 
-  # ----- x86_64 -----
+  # ----- amd64 -----
 
-  thunk-x64:
-    desc: Assemble thunk-x64.S into a COFF amd64 object.
-    sources: [thunk-x64.S]
-    generates: [thunk-x64.o]
+  thunk-amd64:
+    desc: Assemble thunk-amd64.S into a COFF amd64 object.
+    sources: [thunk-amd64.S]
+    generates: [thunk-amd64.o]
     cmds:
-      - clang -target x86_64-pc-windows-gnu -c thunk-x64.S -o thunk-x64.o
+      - clang -target x86_64-pc-windows-gnu -c thunk-amd64.S -o thunk-amd64.o
 
-  compile-x64:
-    desc: Compile main.go for x86_64 UEFI via TinyGo.
-    deps: [thunk-x64]
-    sources: [main.go, "{{.X64_TARGET}}"]
-    generates: [main-x64.o]
+  compile-amd64:
+    desc: Compile main.go for amd64 UEFI via TinyGo.
+    deps: [thunk-amd64]
+    sources: [main.go, debug_off.go, debug_on.go, "{{.AMD64_TARGET}}"]
+    generates: [main-amd64.o]
     cmds:
-      - tinygo build -target={{.X64_TARGET}} -o main-x64.o .
+      - tinygo build {{if .STUB_TAGS}}-tags {{.STUB_TAGS}}{{end}} -target={{.AMD64_TARGET}} -o main-amd64.o .
 
-  link-x64:
-    desc: Link main-x64.o + thunk-x64.o into BOOTX64.EFI.
-    deps: [compile-x64]
-    sources: [main-x64.o, thunk-x64.o]
-    generates: ["{{.X64_OUT}}"]
+  link-amd64:
+    desc: Link main-amd64.o + thunk-amd64.o into BOOTX64.EFI.
+    deps: [compile-amd64]
+    sources: [main-amd64.o, thunk-amd64.o]
+    generates: ["{{.AMD64_OUT}}"]
     cmds:
       # See README — six traps for the full story. /base:0x10000 keeps
       # absolute addresses inside 32 bits; /force:unresolved drops the
@@ -88,29 +118,29 @@ tasks:
         /nodefaultlib
         /force:unresolved
         /base:0x10000
-        /out:{{.X64_OUT}}
-        main-x64.o thunk-x64.o
+        /out:{{.AMD64_OUT}}
+        main-amd64.o thunk-amd64.o
 
-  build-x64:
-    desc: Build the x86_64 EFI binary end-to-end.
-    deps: [link-x64]
+  build-amd64:
+    desc: Build the amd64 EFI binary end-to-end.
+    deps: [link-amd64]
     cmds:
-      - file {{.X64_OUT}}
+      - file {{.AMD64_OUT}}
 
-  esp-x64:
-    desc: Stage BOOTX64.EFI into esp-x64/EFI/BOOT/.
-    deps: [build-x64]
-    sources: ["{{.X64_OUT}}"]
-    generates: [esp-x64/EFI/BOOT/BOOTX64.EFI]
+  esp-amd64:
+    desc: Stage BOOTX64.EFI into esp-amd64/EFI/BOOT/.
+    deps: [build-amd64]
+    sources: ["{{.AMD64_OUT}}"]
+    generates: [esp-amd64/EFI/BOOT/BOOTX64.EFI]
     cmds:
-      - mkdir -p esp-x64/EFI/BOOT
-      - cp {{.X64_OUT}} esp-x64/EFI/BOOT/BOOTX64.EFI
+      - mkdir -p esp-amd64/EFI/BOOT
+      - cp {{.AMD64_OUT}} esp-amd64/EFI/BOOT/BOOTX64.EFI
 
-  qemu-x64:
+  qemu-amd64:
     desc: Boot BOOTX64.EFI under qemu-system-x86_64 + OVMF (Ctrl-A x to quit).
-    deps: [esp-x64]
+    deps: [esp-amd64]
     cmds:
-      - cp {{.OVMF_X64_VARS_TEMPLATE}} ovmf-x64-vars.fd
+      - cp {{.OVMF_AMD64_VARS_TEMPLATE}} ovmf-amd64-vars.fd
       - >-
         qemu-system-x86_64
         -machine q35
@@ -118,17 +148,17 @@ tasks:
         -display none
         -no-reboot
         -serial mon:stdio
-        -drive if=pflash,format=raw,readonly=on,file={{.OVMF_X64_CODE}}
-        -drive if=pflash,format=raw,file=ovmf-x64-vars.fd
-        -drive file=fat:rw:esp-x64,format=raw
+        -drive if=pflash,format=raw,readonly=on,file={{.OVMF_AMD64_CODE}}
+        -drive if=pflash,format=raw,file=ovmf-amd64-vars.fd
+        -drive file=fat:rw:esp-amd64,format=raw
         -net none
 
-  qemu-test-x64:
-    desc: Boot under QEMU and assert the banner reached the serial console (x86_64).
-    deps: [esp-x64]
+  qemu-test-amd64:
+    desc: Boot under QEMU and assert the banner reached the serial console (amd64).
+    deps: [esp-amd64]
     cmds:
-      - cp {{.OVMF_X64_VARS_TEMPLATE}} ovmf-x64-vars.fd
-      - rm -f qemu-x64.log
+      - cp {{.OVMF_AMD64_VARS_TEMPLATE}} ovmf-amd64-vars.fd
+      - rm -f qemu-amd64.log
       - >-
         perl -e 'alarm 180; exec @ARGV'
         qemu-system-x86_64
@@ -136,35 +166,35 @@ tasks:
         -m 256
         -display none
         -no-reboot
-        -serial file:qemu-x64.log
-        -drive if=pflash,format=raw,readonly=on,file={{.OVMF_X64_CODE}}
-        -drive if=pflash,format=raw,file=ovmf-x64-vars.fd
-        -drive file=fat:rw:esp-x64,format=raw
+        -serial file:qemu-amd64.log
+        -drive if=pflash,format=raw,readonly=on,file={{.OVMF_AMD64_CODE}}
+        -drive if=pflash,format=raw,file=ovmf-amd64-vars.fd
+        -drive file=fat:rw:esp-amd64,format=raw
         -net none ; true
-      - grep -q 'Hello, UEFI from TinyGo!' qemu-x64.log && grep -q 'PHASE2-DONE' qemu-x64.log
+      - grep -q 'Hello, UEFI from TinyGo!' qemu-amd64.log && grep -q 'PHASE2-DONE' qemu-amd64.log
 
-  # ----- aarch64 -----
+  # ----- arm64 -----
 
-  thunk-aa64:
-    desc: Assemble thunk-aa64.S into a COFF aarch64 object.
-    sources: [thunk-aa64.S]
-    generates: [thunk-aa64.o]
+  thunk-arm64:
+    desc: Assemble thunk-arm64.S into a COFF arm64 object.
+    sources: [thunk-arm64.S]
+    generates: [thunk-arm64.o]
     cmds:
-      - clang -target aarch64-pc-windows-gnu -c thunk-aa64.S -o thunk-aa64.o
+      - clang -target aarch64-pc-windows-gnu -c thunk-arm64.S -o thunk-arm64.o
 
-  compile-aa64:
-    desc: Compile main.go for aarch64 UEFI via TinyGo.
-    deps: [thunk-aa64]
-    sources: [main.go, "{{.AA64_TARGET}}"]
-    generates: [main-aa64.o]
+  compile-arm64:
+    desc: Compile main.go for arm64 UEFI via TinyGo.
+    deps: [thunk-arm64]
+    sources: [main.go, debug_off.go, debug_on.go, "{{.ARM64_TARGET}}"]
+    generates: [main-arm64.o]
     cmds:
-      - tinygo build -target={{.AA64_TARGET}} -o main-aa64.o .
+      - tinygo build {{if .STUB_TAGS}}-tags {{.STUB_TAGS}}{{end}} -target={{.ARM64_TARGET}} -o main-arm64.o .
 
-  link-aa64:
-    desc: Link main-aa64.o + thunk-aa64.o into BOOTAA64.EFI.
-    deps: [compile-aa64]
-    sources: [main-aa64.o, thunk-aa64.o]
-    generates: ["{{.AA64_OUT}}"]
+  link-arm64:
+    desc: Link main-arm64.o + thunk-arm64.o into BOOTAA64.EFI.
+    deps: [compile-arm64]
+    sources: [main-arm64.o, thunk-arm64.o]
+    generates: ["{{.ARM64_OUT}}"]
     cmds:
       - >-
         lld-link
@@ -174,32 +204,244 @@ tasks:
         /nodefaultlib
         /force:unresolved
         /base:0x10000
-        /out:{{.AA64_OUT}}
-        main-aa64.o thunk-aa64.o
+        /out:{{.ARM64_OUT}}
+        main-arm64.o thunk-arm64.o
 
-  build-aa64:
-    desc: Build the aarch64 EFI binary end-to-end.
-    deps: [link-aa64]
+  build-arm64:
+    desc: Build the arm64 EFI binary end-to-end.
+    deps: [link-arm64]
     cmds:
-      - file {{.AA64_OUT}}
+      - file {{.ARM64_OUT}}
 
-  esp-aa64:
-    desc: Stage BOOTAA64.EFI into esp-aa64/EFI/BOOT/.
-    deps: [build-aa64]
-    sources: ["{{.AA64_OUT}}"]
-    generates: [esp-aa64/EFI/BOOT/BOOTAA64.EFI]
+  # ----- riscv64 -----
+  #
+  # Background:
+  #
+  #   1. The asm thunk (thunk-riscv64.S) and TinyGo target (targets/
+  #      uefi-riscv64.json) are in place.
+  #   2. TinyGo's runtime gap for `goarch=riscv64` is filled by the
+  #      shim shipped in cloud-boot/tinygo-riscv64-uefi/runtime/
+  #      arch_riscv64.go (drop-in patch — see that repo's README).
+  #   3. We link with `go-coff/peln`, NOT `lld-link` — the latter has
+  #      no `/machine:riscv64`, peln has the full RISC-V reloc table.
+
+  thunk-riscv64:
+    desc: Assemble thunk-riscv64.S into a COFF riscv64 object.
+    sources: [thunk-riscv64.S]
+    generates: [thunk-riscv64.o]
     cmds:
-      - mkdir -p esp-aa64/EFI/BOOT
-      - cp {{.AA64_OUT}} esp-aa64/EFI/BOOT/BOOTAA64.EFI
+      # Apple's bundled clang has no riscv64 backend; pick up the
+      # Homebrew LLVM one (override CLANG_RISCV in the env to point
+      # elsewhere).
+      - "{{.CLANG_RISCV}} -target riscv64-pc-windows-gnu -c thunk-riscv64.S -o thunk-riscv64.o"
 
-  qemu-aa64:
+  compile-riscv64:
+    desc: Compile main.go for riscv64 UEFI via TinyGo (needs the arch_riscv64.go runtime shim from cloud-boot/tinygo-riscv64-uefi).
+    deps: [thunk-riscv64]
+    sources: [main.go, debug_off.go, debug_on.go, "{{.RISCV64_TARGET}}"]
+    generates: [main-riscv64.o]
+    cmds:
+      - tinygo build {{if .STUB_TAGS}}-tags {{.STUB_TAGS}}{{end}} -target={{.RISCV64_TARGET}} -o main-riscv64.o .
+
+  link-riscv64:
+    desc: Link main-riscv64.o + thunk-riscv64.o into BOOTRISCV64.EFI via go-coff/peln (lld-link has no /machine:riscv64).
+    deps: [compile-riscv64]
+    sources: [main-riscv64.o, thunk-riscv64.o]
+    generates: ["{{.RISCV64_OUT}}"]
+    cmds:
+      # pectl drives go-coff/peln; same machine code (0x5064) and
+      # same UEFI subsystem (10) flags as lld-link would.
+      - >-
+        (cd {{.PECTL}} && go run . link
+          --machine riscv64
+          --entry _start
+          --image-base 0x10000
+          --allow-unresolved
+          --output $OLDPWD/{{.RISCV64_OUT}}
+          $OLDPWD/main-riscv64.o $OLDPWD/thunk-riscv64.o)
+
+  build-riscv64:
+    desc: Build the riscv64 EFI binary end-to-end.
+    deps: [link-riscv64]
+    cmds:
+      - file {{.RISCV64_OUT}}
+
+  esp-riscv64:
+    desc: Stage BOOTRISCV64.EFI into esp-riscv64/EFI/BOOT/.
+    deps: [build-riscv64]
+    sources: ["{{.RISCV64_OUT}}"]
+    generates: [esp-riscv64/EFI/BOOT/BOOTRISCV64.EFI]
+    cmds:
+      - mkdir -p esp-riscv64/EFI/BOOT
+      - cp {{.RISCV64_OUT}} esp-riscv64/EFI/BOOT/BOOTRISCV64.EFI
+
+  qemu-riscv64:
+    desc: Boot BOOTRISCV64.EFI under qemu-system-riscv64 + OVMF/EDK2 (Ctrl-A x to quit).
+    deps: [esp-riscv64]
+    cmds:
+      # The QEMU EFI firmware for riscv64 (edk2-riscv-code.fd) ships
+      # in qemu-system-data on Debian / Fedora; pkgsrc / Homebrew
+      # users may need to fetch RISCV_VIRT_CODE.fd from
+      # https://retrage.github.io/edk2-nightly/. Pass via
+      # OVMF_RISCV_CODE=/path/to/code.fd if it lives elsewhere.
+      - >-
+        qemu-system-riscv64
+        -machine virt
+        -cpu rv64
+        -m 512
+        -display none
+        -no-reboot
+        -serial mon:stdio
+        -drive if=pflash,format=raw,readonly=on,file=${OVMF_RISCV_CODE:-/usr/share/qemu-efi-riscv64/RISCV_VIRT_CODE.fd}
+        -drive if=pflash,format=raw,file=${OVMF_RISCV_VARS:-/usr/share/qemu-efi-riscv64/RISCV_VIRT_VARS.fd}
+        -drive file=fat:rw:esp-riscv64,format=raw,id=hd0,if=none
+        -device virtio-blk-device,drive=hd0
+        -net none
+
+  qemu-test-riscv64:
+    desc: Boot under qemu-system-riscv64 and assert the banner reached the serial console.
+    deps: [esp-riscv64]
+    cmds:
+      - rm -f qemu-riscv64.log
+      - >-
+        perl -e 'alarm 240; exec @ARGV'
+        qemu-system-riscv64
+        -machine virt
+        -cpu rv64
+        -m 512
+        -display none
+        -no-reboot
+        -serial file:qemu-riscv64.log
+        -drive if=pflash,format=raw,readonly=on,file=${OVMF_RISCV_CODE:-/usr/share/qemu-efi-riscv64/RISCV_VIRT_CODE.fd}
+        -drive if=pflash,format=raw,file=${OVMF_RISCV_VARS:-/usr/share/qemu-efi-riscv64/RISCV_VIRT_VARS.fd}
+        -drive file=fat:rw:esp-riscv64,format=raw,id=hd0,if=none
+        -device virtio-blk-device,drive=hd0
+        -net none ; true
+      - grep -q 'Hello, UEFI from TinyGo!' qemu-riscv64.log && grep -q 'PHASE2-DONE' qemu-riscv64.log
+
+  # ----- loongarch64 -----
+  #
+  # All three previously-pending pieces are now in place:
+  #
+  #   1. TinyGo runtime shim — cloud-boot/tinygo-loongarch64-uefi/
+  #      runtime/arch_loong64.go. Run `task -d ../../cloud-boot/
+  #      tinygo-loongarch64-uefi/ patch:apply` once before the first
+  #      compile-loongarch64 invocation, or `task verify` end-to-end
+  #      from that directory.
+  #   2. `targets/uefi-loongarch64.json` — llvm-target =
+  #      loongarch64-pc-windows-gnu, goarch = loong64.
+  #   3. `thunk-loongarch64.S` — LP64D thunks mirroring the RV64 ones
+  #      (efiCall1..6 + loadFile2 + loadFile2Ptr).
+  #
+  # We link with `go-coff/peln`, NOT `lld-link` — the latter has no
+  # `/machine:loongarch64`, peln has the full R_LARCH_* reloc table.
+
+  thunk-loongarch64:
+    desc: Assemble thunk-loongarch64.S into a COFF loongarch64 object.
+    sources: [thunk-loongarch64.S]
+    generates: [thunk-loongarch64.o]
+    cmds:
+      # Apple's bundled clang has no loongarch64 backend; pick up the
+      # Homebrew LLVM one (override CLANG_LOONGARCH in the env to point
+      # elsewhere).
+      - "{{.CLANG_LOONGARCH}} -target loongarch64-pc-windows-gnu -c thunk-loongarch64.S -o thunk-loongarch64.o"
+
+  compile-loongarch64:
+    desc: Compile main.go for loongarch64 UEFI via TinyGo (needs the arch_loong64.go runtime shim from cloud-boot/tinygo-loongarch64-uefi).
+    deps: [thunk-loongarch64]
+    sources: [main.go, debug_off.go, debug_on.go, "{{.LOONGARCH64_TARGET}}"]
+    generates: [main-loongarch64.o]
+    cmds:
+      - tinygo build {{if .STUB_TAGS}}-tags {{.STUB_TAGS}}{{end}} -target={{.LOONGARCH64_TARGET}} -o main-loongarch64.o .
+
+  link-loongarch64:
+    desc: Link main-loongarch64.o + thunk-loongarch64.o into BOOTLOONGARCH64.EFI via go-coff/peln (lld-link has no /machine:loongarch64).
+    deps: [compile-loongarch64]
+    sources: [main-loongarch64.o, thunk-loongarch64.o]
+    generates: ["{{.LOONGARCH64_OUT}}"]
+    cmds:
+      - >-
+        (cd {{.PECTL}} && go run . link
+          --machine loongarch64
+          --entry _start
+          --image-base 0x10000
+          --allow-unresolved
+          --output $OLDPWD/{{.LOONGARCH64_OUT}}
+          $OLDPWD/main-loongarch64.o $OLDPWD/thunk-loongarch64.o)
+
+  build-loongarch64:
+    desc: Build the loongarch64 EFI binary end-to-end.
+    deps: [link-loongarch64]
+    cmds:
+      - file {{.LOONGARCH64_OUT}}
+
+  esp-loongarch64:
+    desc: Stage BOOTLOONGARCH64.EFI into esp-loongarch64/EFI/BOOT/.
+    deps: [build-loongarch64]
+    sources: ["{{.LOONGARCH64_OUT}}"]
+    generates: [esp-loongarch64/EFI/BOOT/BOOTLOONGARCH64.EFI]
+    cmds:
+      - mkdir -p esp-loongarch64/EFI/BOOT
+      - cp {{.LOONGARCH64_OUT}} esp-loongarch64/EFI/BOOT/BOOTLOONGARCH64.EFI
+
+  qemu-loongarch64:
+    desc: Boot BOOTLOONGARCH64.EFI under qemu-system-loongarch64 + OVMF/EDK2 (Ctrl-A x to quit).
+    deps: [esp-loongarch64]
+    cmds:
+      # The EDK2 LoongArch firmware (QEMU_EFI-loongarch64.fd) is
+      # produced by the EDK2 build with --platform Platform/Loongson/
+      # LoongArchQemuPkg. Override OVMF_LOONGARCH_CODE if the binary
+      # lives elsewhere on the host.
+      - >-
+        qemu-system-loongarch64
+        -machine virt
+        -cpu la464
+        -m 512
+        -display none
+        -no-reboot
+        -serial mon:stdio
+        -bios ${OVMF_LOONGARCH_CODE:-/usr/share/qemu-efi-loongarch64/QEMU_EFI.fd}
+        -drive file=fat:rw:esp-loongarch64,format=raw,id=hd0,if=none
+        -device virtio-blk-pci,drive=hd0
+        -net none
+
+  qemu-test-loongarch64:
+    desc: Boot under qemu-system-loongarch64 and assert the banner reached the serial console.
+    deps: [esp-loongarch64]
+    cmds:
+      - rm -f qemu-loongarch64.log
+      - >-
+        perl -e 'alarm 240; exec @ARGV'
+        qemu-system-loongarch64
+        -machine virt
+        -cpu la464
+        -m 512
+        -display none
+        -no-reboot
+        -serial file:qemu-loongarch64.log
+        -bios ${OVMF_LOONGARCH_CODE:-/usr/share/qemu-efi-loongarch64/QEMU_EFI.fd}
+        -drive file=fat:rw:esp-loongarch64,format=raw,id=hd0,if=none
+        -device virtio-blk-pci,drive=hd0
+        -net none ; true
+      - grep -q 'Hello, UEFI from TinyGo!' qemu-loongarch64.log && grep -q 'PHASE2-DONE' qemu-loongarch64.log
+
+  esp-arm64:
+    desc: Stage BOOTAA64.EFI into esp-arm64/EFI/BOOT/.
+    deps: [build-arm64]
+    sources: ["{{.ARM64_OUT}}"]
+    generates: [esp-arm64/EFI/BOOT/BOOTAA64.EFI]
+    cmds:
+      - mkdir -p esp-arm64/EFI/BOOT
+      - cp {{.ARM64_OUT}} esp-arm64/EFI/BOOT/BOOTAA64.EFI
+
+  qemu-arm64:
     desc: Boot BOOTAA64.EFI under qemu-system-aarch64 + OVMF (Ctrl-A x to quit).
-    deps: [esp-aa64]
+    deps: [esp-arm64]
     cmds:
-      # The aarch64 vars file ships at 64 KiB but firmware expects 64 MiB —
+      # The arm64 vars file ships at 64 KiB but firmware expects 64 MiB —
       # pad it. (See OVMF aarch64 packaging notes.) The pflash drive is also
-      # served via virtio-blk because q35 / Sata are x86-only.
-      - cp {{.OVMF_AA64_VARS_TEMPLATE}} ovmf-aa64-vars.fd
+      # served via virtio-blk because q35 / Sata are amd64-only.
+      - cp {{.OVMF_ARM64_VARS_TEMPLATE}} ovmf-arm64-vars.fd
       - >-
         qemu-system-aarch64
         -machine virt
@@ -208,18 +450,18 @@ tasks:
         -display none
         -no-reboot
         -serial mon:stdio
-        -drive if=pflash,format=raw,readonly=on,file={{.OVMF_AA64_CODE}}
-        -drive if=pflash,format=raw,file=ovmf-aa64-vars.fd
-        -drive file=fat:rw:esp-aa64,format=raw,id=hd0,if=none
+        -drive if=pflash,format=raw,readonly=on,file={{.OVMF_ARM64_CODE}}
+        -drive if=pflash,format=raw,file=ovmf-arm64-vars.fd
+        -drive file=fat:rw:esp-arm64,format=raw,id=hd0,if=none
         -device virtio-blk-device,drive=hd0
         -net none
 
-  qemu-test-aa64:
+  qemu-test-arm64:
     desc: Boot under qemu-system-aarch64 and assert the banner reached the serial console.
-    deps: [esp-aa64]
+    deps: [esp-arm64]
     cmds:
-      - cp {{.OVMF_AA64_VARS_TEMPLATE}} ovmf-aa64-vars.fd
-      - rm -f qemu-aa64.log
+      - cp {{.OVMF_ARM64_VARS_TEMPLATE}} ovmf-arm64-vars.fd
+      - rm -f qemu-arm64.log
       - >-
         perl -e 'alarm 240; exec @ARGV'
         qemu-system-aarch64
@@ -228,27 +470,27 @@ tasks:
         -m 512
         -display none
         -no-reboot
-        -serial file:qemu-aa64.log
-        -drive if=pflash,format=raw,readonly=on,file={{.OVMF_AA64_CODE}}
-        -drive if=pflash,format=raw,file=ovmf-aa64-vars.fd
-        -drive file=fat:rw:esp-aa64,format=raw,id=hd0,if=none
+        -serial file:qemu-arm64.log
+        -drive if=pflash,format=raw,readonly=on,file={{.OVMF_ARM64_CODE}}
+        -drive if=pflash,format=raw,file=ovmf-arm64-vars.fd
+        -drive file=fat:rw:esp-arm64,format=raw,id=hd0,if=none
         -device virtio-blk-device,drive=hd0
         -net none ; true
-      - grep -q 'Hello, UEFI from TinyGo!' qemu-aa64.log && grep -q 'PHASE2-DONE' qemu-aa64.log
+      - grep -q 'Hello, UEFI from TinyGo!' qemu-arm64.log && grep -q 'PHASE2-DONE' qemu-arm64.log
 
   # ----- multi-arch ISO -----
 
   esp-img:
     desc: Build a 4 MiB FAT16 ESP holding both BOOTX64.EFI and BOOTAA64.EFI.
-    deps: [build-x64, build-aa64]
-    sources: ["{{.X64_OUT}}", "{{.AA64_OUT}}", cmd/mkesp/main.go]
+    deps: [build-amd64, build-arm64]
+    sources: ["{{.AMD64_OUT}}", "{{.ARM64_OUT}}", cmd/mkesp/main.go]
     generates: [esp.img]
     cmds:
       # cmd/mkesp is a ~200-line Go program that writes a FAT16 image
       # directly. Pure stdlib. Replaces dd + mformat + mmd + mcopy.
       # The image is 4 MiB: big enough for FAT16, small enough that El
       # Torito's 16-bit "Sector Count" field can describe it.
-      - go run ./cmd/mkesp esp.img {{.X64_OUT}} {{.AA64_OUT}}
+      - go run ./cmd/mkesp esp.img {{.AMD64_OUT}} {{.ARM64_OUT}}
 
   iso:
     desc: Build a multi-arch bootable ISO from BOOTX64.EFI + BOOTAA64.EFI.
@@ -259,15 +501,15 @@ tasks:
       # cmd/mkiso wraps github.com/diskfs/go-diskfs: ISO 9660 + Rock Ridge
       # + an El Torito UEFI boot record pointing at /boot/efi.img inside
       # the ISO. Replaces xorriso. The FAT image inside the ISO carries
-      # both /EFI/BOOT/BOOTX64.EFI and /EFI/BOOT/BOOTAA64.EFI, so x86_64
-      # firmware picks the first, aarch64 firmware picks the second.
-      - go run ./cmd/mkiso stub.iso esp.img {{.X64_OUT}} {{.AA64_OUT}}
+      # both /EFI/BOOT/BOOTX64.EFI and /EFI/BOOT/BOOTAA64.EFI, so amd64
+      # firmware picks the first, arm64 firmware picks the second.
+      - go run ./cmd/mkiso stub.iso esp.img {{.AMD64_OUT}} {{.ARM64_OUT}}
 
-  qemu-iso-x64:
+  qemu-iso-amd64:
     desc: Boot the multi-arch ISO under qemu-system-x86_64 (CD-ROM / El Torito).
     deps: [iso]
     cmds:
-      - cp {{.OVMF_X64_VARS_TEMPLATE}} ovmf-x64-vars.fd
+      - cp {{.OVMF_AMD64_VARS_TEMPLATE}} ovmf-amd64-vars.fd
       # -cdrom + -boot d takes the El Torito UEFI boot record path: OVMF
       # finds the UEFI boot image listed at /boot/efi.img in the ISO,
       # loads the FAT inside it, and runs \EFI\BOOT\BOOTX64.EFI from there.
@@ -278,17 +520,17 @@ tasks:
         -display none
         -no-reboot
         -serial mon:stdio
-        -drive if=pflash,format=raw,readonly=on,file={{.OVMF_X64_CODE}}
-        -drive if=pflash,format=raw,file=ovmf-x64-vars.fd
+        -drive if=pflash,format=raw,readonly=on,file={{.OVMF_AMD64_CODE}}
+        -drive if=pflash,format=raw,file=ovmf-amd64-vars.fd
         -cdrom stub.iso
         -boot d
         -net none
 
-  qemu-iso-aa64:
+  qemu-iso-arm64:
     desc: Boot the multi-arch ISO under qemu-system-aarch64.
     deps: [iso]
     cmds:
-      - cp {{.OVMF_AA64_VARS_TEMPLATE}} ovmf-aa64-vars.fd
+      - cp {{.OVMF_ARM64_VARS_TEMPLATE}} ovmf-arm64-vars.fd
       - >-
         qemu-system-aarch64
         -machine virt
@@ -297,18 +539,18 @@ tasks:
         -display none
         -no-reboot
         -serial mon:stdio
-        -drive if=pflash,format=raw,readonly=on,file={{.OVMF_AA64_CODE}}
-        -drive if=pflash,format=raw,file=ovmf-aa64-vars.fd
+        -drive if=pflash,format=raw,readonly=on,file={{.OVMF_ARM64_CODE}}
+        -drive if=pflash,format=raw,file=ovmf-arm64-vars.fd
         -drive file=stub.iso,format=raw,id=cd0,if=none,media=cdrom
         -device virtio-blk-device,drive=cd0
         -net none
 
-  qemu-iso-test-x64:
+  qemu-iso-test-amd64:
     desc: Boot the multi-arch ISO on qemu-system-x86_64 and assert the banner.
     deps: [iso]
     cmds:
-      - cp {{.OVMF_X64_VARS_TEMPLATE}} ovmf-x64-vars.fd
-      - rm -f qemu-iso-x64.log
+      - cp {{.OVMF_AMD64_VARS_TEMPLATE}} ovmf-amd64-vars.fd
+      - rm -f qemu-iso-amd64.log
       - >-
         perl -e 'alarm 180; exec @ARGV'
         qemu-system-x86_64
@@ -316,20 +558,20 @@ tasks:
         -m 256
         -display none
         -no-reboot
-        -serial file:qemu-iso-x64.log
-        -drive if=pflash,format=raw,readonly=on,file={{.OVMF_X64_CODE}}
-        -drive if=pflash,format=raw,file=ovmf-x64-vars.fd
+        -serial file:qemu-iso-amd64.log
+        -drive if=pflash,format=raw,readonly=on,file={{.OVMF_AMD64_CODE}}
+        -drive if=pflash,format=raw,file=ovmf-amd64-vars.fd
         -cdrom stub.iso
         -boot d
         -net none ; true
-      - grep -q 'Hello, UEFI from TinyGo!' qemu-iso-x64.log && grep -q 'PHASE2-DONE' qemu-iso-x64.log
+      - grep -q 'Hello, UEFI from TinyGo!' qemu-iso-amd64.log && grep -q 'PHASE2-DONE' qemu-iso-amd64.log
 
-  qemu-iso-test-aa64:
+  qemu-iso-test-arm64:
     desc: Boot the multi-arch ISO on qemu-system-aarch64 and assert the banner.
     deps: [iso]
     cmds:
-      - cp {{.OVMF_AA64_VARS_TEMPLATE}} ovmf-aa64-vars.fd
-      - rm -f qemu-iso-aa64.log
+      - cp {{.OVMF_ARM64_VARS_TEMPLATE}} ovmf-arm64-vars.fd
+      - rm -f qemu-iso-arm64.log
       - >-
         perl -e 'alarm 240; exec @ARGV'
         qemu-system-aarch64
@@ -338,13 +580,13 @@ tasks:
         -m 512
         -display none
         -no-reboot
-        -serial file:qemu-iso-aa64.log
-        -drive if=pflash,format=raw,readonly=on,file={{.OVMF_AA64_CODE}}
-        -drive if=pflash,format=raw,file=ovmf-aa64-vars.fd
+        -serial file:qemu-iso-arm64.log
+        -drive if=pflash,format=raw,readonly=on,file={{.OVMF_ARM64_CODE}}
+        -drive if=pflash,format=raw,file=ovmf-arm64-vars.fd
         -drive file=stub.iso,format=raw,id=cd0,if=none,media=cdrom
         -device virtio-blk-device,drive=cd0
         -net none ; true
-      - grep -q 'Hello, UEFI from TinyGo!' qemu-iso-aa64.log && grep -q 'PHASE2-DONE' qemu-iso-aa64.log
+      - grep -q 'Hello, UEFI from TinyGo!' qemu-iso-arm64.log && grep -q 'PHASE2-DONE' qemu-iso-arm64.log
 
   # ----- phase-3 self-load smoke test -----
   #
@@ -356,36 +598,36 @@ tasks:
   # prints "no .linux section, phase 3 skipped". A successful run shows
   # the banner twice on the serial console.
 
-  uki-x64:
-    desc: "Phase 3: build BOOTX64.EFI and append it as .linux via pec → BOOTX64-uki.EFI."
-    deps: [build-x64]
-    sources: ["{{.X64_OUT}}"]
+  uki-amd64:
+    desc: "Phase 3: build BOOTX64.EFI and append it as .linux via pectl → BOOTX64-uki.EFI."
+    deps: [build-amd64]
+    sources: ["{{.AMD64_OUT}}"]
     generates: [BOOTX64-uki.EFI]
     cmds:
       - >-
-        (cd {{.PEC}} && go run . --add-section .linux=$OLDPWD/{{.X64_OUT}}
-        -o $OLDPWD/BOOTX64-uki.EFI $OLDPWD/{{.X64_OUT}})
+        (cd {{.PECTL}} && go run . append --section .linux=$OLDPWD/{{.AMD64_OUT}}
+        -o $OLDPWD/BOOTX64-uki.EFI $OLDPWD/{{.AMD64_OUT}})
       - file BOOTX64-uki.EFI
 
-  uki-aa64:
-    desc: "Phase 3: build BOOTAA64.EFI and append it as .linux via pec → BOOTAA64-uki.EFI."
-    deps: [build-aa64]
-    sources: ["{{.AA64_OUT}}"]
+  uki-arm64:
+    desc: "Phase 3: build BOOTAA64.EFI and append it as .linux via pectl → BOOTAA64-uki.EFI."
+    deps: [build-arm64]
+    sources: ["{{.ARM64_OUT}}"]
     generates: [BOOTAA64-uki.EFI]
     cmds:
       - >-
-        (cd {{.PEC}} && go run . --add-section .linux=$OLDPWD/{{.AA64_OUT}}
-        -o $OLDPWD/BOOTAA64-uki.EFI $OLDPWD/{{.AA64_OUT}})
+        (cd {{.PECTL}} && go run . append --section .linux=$OLDPWD/{{.ARM64_OUT}}
+        -o $OLDPWD/BOOTAA64-uki.EFI $OLDPWD/{{.ARM64_OUT}})
       - file BOOTAA64-uki.EFI
 
-  uki-test-x64:
+  uki-test-amd64:
     desc: "Phase 3: boot the UKI on qemu-system-x86_64 and assert the banner appears TWICE."
-    deps: [uki-x64]
+    deps: [uki-amd64]
     cmds:
-      - mkdir -p esp-uki-x64/EFI/BOOT
-      - cp BOOTX64-uki.EFI esp-uki-x64/EFI/BOOT/BOOTX64.EFI
-      - cp {{.OVMF_X64_VARS_TEMPLATE}} ovmf-x64-vars.fd
-      - rm -f qemu-uki-x64.log
+      - mkdir -p esp-uki-amd64/EFI/BOOT
+      - cp BOOTX64-uki.EFI esp-uki-amd64/EFI/BOOT/BOOTX64.EFI
+      - cp {{.OVMF_AMD64_VARS_TEMPLATE}} ovmf-amd64-vars.fd
+      - rm -f qemu-uki-amd64.log
       - >-
         perl -e 'alarm 240; exec @ARGV'
         qemu-system-x86_64
@@ -393,25 +635,25 @@ tasks:
         -m 256
         -display none
         -no-reboot
-        -serial file:qemu-uki-x64.log
-        -drive if=pflash,format=raw,readonly=on,file={{.OVMF_X64_CODE}}
-        -drive if=pflash,format=raw,file=ovmf-x64-vars.fd
-        -drive file=fat:rw:esp-uki-x64,format=raw
+        -serial file:qemu-uki-amd64.log
+        -drive if=pflash,format=raw,readonly=on,file={{.OVMF_AMD64_CODE}}
+        -drive if=pflash,format=raw,file=ovmf-amd64-vars.fd
+        -drive file=fat:rw:esp-uki-amd64,format=raw
         -net none ; true
       # Outer + inner each emit a banner — assert both. Also verify the
       # inner reached its "no .linux" branch, which proves StartImage
       # actually transferred control.
-      - test "$(grep -c 'Hello, UEFI from TinyGo!' qemu-uki-x64.log)" = 2
-      - grep -q 'no .linux section, phase 3 skipped' qemu-uki-x64.log
+      - test "$(grep -c 'Hello, UEFI from TinyGo!' qemu-uki-amd64.log)" = 2
+      - grep -q 'no .linux section, phase 3 skipped' qemu-uki-amd64.log
 
-  uki-test-aa64:
+  uki-test-arm64:
     desc: "Phase 3: boot the UKI on qemu-system-aarch64 and assert the banner appears TWICE."
-    deps: [uki-aa64]
+    deps: [uki-arm64]
     cmds:
-      - mkdir -p esp-uki/EFI/BOOT
-      - cp BOOTAA64-uki.EFI esp-uki/EFI/BOOT/BOOTAA64.EFI
-      - cp {{.OVMF_AA64_VARS_TEMPLATE}} ovmf-aa64-vars.fd
-      - rm -f qemu-uki-aa64.log
+      - mkdir -p esp-uki-arm64/EFI/BOOT
+      - cp BOOTAA64-uki.EFI esp-uki-arm64/EFI/BOOT/BOOTAA64.EFI
+      - cp {{.OVMF_ARM64_VARS_TEMPLATE}} ovmf-arm64-vars.fd
+      - rm -f qemu-uki-arm64.log
       - >-
         perl -e 'alarm 240; exec @ARGV'
         qemu-system-aarch64
@@ -420,14 +662,14 @@ tasks:
         -m 512
         -display none
         -no-reboot
-        -serial file:qemu-uki-aa64.log
-        -drive if=pflash,format=raw,readonly=on,file={{.OVMF_AA64_CODE}}
-        -drive if=pflash,format=raw,file=ovmf-aa64-vars.fd
-        -drive file=fat:rw:esp-uki,format=raw,id=hd0,if=none
+        -serial file:qemu-uki-arm64.log
+        -drive if=pflash,format=raw,readonly=on,file={{.OVMF_ARM64_CODE}}
+        -drive if=pflash,format=raw,file=ovmf-arm64-vars.fd
+        -drive file=fat:rw:esp-uki-arm64,format=raw,id=hd0,if=none
         -device virtio-blk-device,drive=hd0
         -net none ; true
-      - test "$(grep -c 'Hello, UEFI from TinyGo!' qemu-uki-aa64.log)" = 2
-      - grep -q 'no .linux section, phase 3 skipped' qemu-uki-aa64.log
+      - test "$(grep -c 'Hello, UEFI from TinyGo!' qemu-uki-arm64.log)" = 2
+      - grep -q 'no .linux section, phase 3 skipped' qemu-uki-arm64.log
 
   # ----- UKI discovery smoke (phase 3a) -----
   #
@@ -438,30 +680,30 @@ tasks:
   # via the local `pe` library; the boot then asserts that reportUKI
   # found 3/5 sections.
 
-  uki3a-x64:
+  uki3a-amd64:
     desc: "Phase 3a: BOOTX64.EFI + test .cmdline/.osrel/.uname → BOOTX64-uki3a.EFI."
-    deps: [build-x64]
-    sources: ["{{.X64_OUT}}", cmd/mkuki/main.go]
+    deps: [build-amd64]
+    sources: ["{{.AMD64_OUT}}", cmd/mkuki/main.go]
     generates: [BOOTX64-uki3a.EFI]
     cmds:
-      - go run ./cmd/mkuki BOOTX64-uki3a.EFI {{.X64_OUT}}
+      - go run ./cmd/mkuki BOOTX64-uki3a.EFI {{.AMD64_OUT}}
 
-  uki3a-aa64:
+  uki3a-arm64:
     desc: "Phase 3a: BOOTAA64.EFI + test .cmdline/.osrel/.uname → BOOTAA64-uki3a.EFI."
-    deps: [build-aa64]
-    sources: ["{{.AA64_OUT}}", cmd/mkuki/main.go]
+    deps: [build-arm64]
+    sources: ["{{.ARM64_OUT}}", cmd/mkuki/main.go]
     generates: [BOOTAA64-uki3a.EFI]
     cmds:
-      - go run ./cmd/mkuki BOOTAA64-uki3a.EFI {{.AA64_OUT}}
+      - go run ./cmd/mkuki BOOTAA64-uki3a.EFI {{.ARM64_OUT}}
 
-  uki3a-test-x64:
+  uki3a-test-amd64:
     desc: "Phase 3a: boot BOOTX64-uki3a.EFI and assert 3/5 sections recognised."
-    deps: [uki3a-x64]
+    deps: [uki3a-amd64]
     cmds:
-      - mkdir -p esp-uki3a-x64/EFI/BOOT
-      - cp BOOTX64-uki3a.EFI esp-uki3a-x64/EFI/BOOT/BOOTX64.EFI
-      - cp {{.OVMF_X64_VARS_TEMPLATE}} ovmf-x64-vars.fd
-      - rm -f qemu-uki3a-x64.log
+      - mkdir -p esp-uki3a-amd64/EFI/BOOT
+      - cp BOOTX64-uki3a.EFI esp-uki3a-amd64/EFI/BOOT/BOOTX64.EFI
+      - cp {{.OVMF_AMD64_VARS_TEMPLATE}} ovmf-amd64-vars.fd
+      - rm -f qemu-uki3a-amd64.log
       - >-
         perl -e 'alarm 180; exec @ARGV'
         qemu-system-x86_64
@@ -469,24 +711,24 @@ tasks:
         -m 256
         -display none
         -no-reboot
-        -serial file:qemu-uki3a-x64.log
-        -drive if=pflash,format=raw,readonly=on,file={{.OVMF_X64_CODE}}
-        -drive if=pflash,format=raw,file=ovmf-x64-vars.fd
-        -drive file=fat:rw:esp-uki3a-x64,format=raw
+        -serial file:qemu-uki3a-amd64.log
+        -drive if=pflash,format=raw,readonly=on,file={{.OVMF_AMD64_CODE}}
+        -drive if=pflash,format=raw,file=ovmf-amd64-vars.fd
+        -drive file=fat:rw:esp-uki3a-amd64,format=raw
         -net none ; true
-      - grep -q 'PHASE3A-DONE' qemu-uki3a-x64.log
-      - "grep -q 'UKI payload sections found: 4/5' qemu-uki3a-x64.log"
-      - grep -q 'PHASE3B-DONE' qemu-uki3a-x64.log
-      - grep -q 'console=ttyS0 quiet rw' qemu-uki3a-x64.log
+      - grep -q 'PHASE3A-DONE' qemu-uki3a-amd64.log
+      - "grep -q 'UKI payload sections found: 4/5' qemu-uki3a-amd64.log"
+      - grep -q 'PHASE3B-DONE' qemu-uki3a-amd64.log
+      - grep -q 'console=ttyS0 quiet rw' qemu-uki3a-amd64.log
 
-  uki3a-test-aa64:
+  uki3a-test-arm64:
     desc: "Phase 3a: boot BOOTAA64-uki3a.EFI and assert 3/5 sections recognised."
-    deps: [uki3a-aa64]
+    deps: [uki3a-arm64]
     cmds:
-      - mkdir -p esp-uki3a-aa64/EFI/BOOT
-      - cp BOOTAA64-uki3a.EFI esp-uki3a-aa64/EFI/BOOT/BOOTAA64.EFI
-      - cp {{.OVMF_AA64_VARS_TEMPLATE}} ovmf-aa64-vars.fd
-      - rm -f qemu-uki3a-aa64.log
+      - mkdir -p esp-uki3a-arm64/EFI/BOOT
+      - cp BOOTAA64-uki3a.EFI esp-uki3a-arm64/EFI/BOOT/BOOTAA64.EFI
+      - cp {{.OVMF_ARM64_VARS_TEMPLATE}} ovmf-arm64-vars.fd
+      - rm -f qemu-uki3a-arm64.log
       - >-
         perl -e 'alarm 240; exec @ARGV'
         qemu-system-aarch64
@@ -495,48 +737,99 @@ tasks:
         -m 512
         -display none
         -no-reboot
-        -serial file:qemu-uki3a-aa64.log
-        -drive if=pflash,format=raw,readonly=on,file={{.OVMF_AA64_CODE}}
-        -drive if=pflash,format=raw,file=ovmf-aa64-vars.fd
-        -drive file=fat:rw:esp-uki3a-aa64,format=raw,id=hd0,if=none
-        -device virtio-blk-device,drive=hd0
+        -serial file:qemu-uki3a-arm64.log
+        -drive if=pflash,format=raw,readonly=on,file={{.OVMF_ARM64_CODE}}
+        -drive if=pflash,format=raw,file=ovmf-arm64-vars.fd
+        -drive file=stub.iso,format=raw,id=cd0,if=none,media=cdrom
+        -device virtio-blk-device,drive=cd0
         -net none ; true
-      - grep -q 'PHASE3A-DONE' qemu-uki3a-aa64.log
-      - "grep -q 'UKI payload sections found: 4/5' qemu-uki3a-aa64.log"
-      - grep -q 'PHASE3B-DONE' qemu-uki3a-aa64.log
-      - grep -q 'console=ttyS0 quiet rw' qemu-uki3a-aa64.log
+      - grep -q 'PHASE3A-DONE' qemu-uki3a-arm64.log
+      - "grep -q 'UKI payload sections found: 4/5' qemu-uki3a-arm64.log"
+      - grep -q 'PHASE3B-DONE' qemu-uki3a-arm64.log
+      - grep -q 'console=ttyS0 quiet rw' qemu-uki3a-arm64.log
 
   # ----- aggregate -----
 
   build:
-    desc: Build EFI binaries for both x86_64 and aarch64.
-    deps: [build-x64, build-aa64]
+    desc: Build EFI binaries for both amd64 and arm64.
+    deps: [build-amd64, build-arm64]
 
   qemu-test:
     desc: Run the boot test on both architectures (raw FAT disk).
-    deps: [qemu-test-x64, qemu-test-aa64]
+    deps: [qemu-test-amd64, qemu-test-arm64]
 
   qemu-iso-test:
     desc: Run the boot test on both architectures from the same ISO.
-    deps: [qemu-iso-test-x64, qemu-iso-test-aa64]
+    deps: [qemu-iso-test-amd64, qemu-iso-test-arm64]
 
   uki-test:
     desc: Run the phase-3 self-load smoke test on both architectures.
-    deps: [uki-test-x64, uki-test-aa64]
+    deps: [uki-test-amd64, uki-test-arm64]
 
   uki3a-test:
     desc: Run the phase-3a UKI section discovery test on both architectures.
-    deps: [uki3a-test-x64, uki3a-test-aa64]
+    deps: [uki3a-test-amd64, uki3a-test-arm64]
+
+  # ----- SecureBoot -----
+  #
+  # End-to-end recipe: generate a one-off self-signed DB key, sign the
+  # built EFI image with `pectl sign`, and (on amd64) boot it under
+  # OVMF's SecureBoot variant. The OVMF amd64 SecureBoot firmware that
+  # ships with Homebrew/QEMU is pre-enrolled with Microsoft's certs and
+  # WILL refuse our self-signed image — what we are demonstrating is
+  # the rejection mechanism. To boot a self-signed UKI for real, the
+  # vars file must be re-provisioned with our cert in db; see
+  # docs/secureboot.md for the recipe (libguestfs `virt-fw-vars`).
+
+  sb-keys:
+    desc: Generate a one-off self-signed SecureBoot key pair (sb.key, sb.crt).
+    sources: []
+    generates: [sb.key, sb.crt]
+    status:
+      - test -f sb.key && test -f sb.crt
+    cmds:
+      - >-
+        openssl req -newkey rsa:2048 -nodes
+        -keyout sb.key -new -x509 -sha256 -days 3650
+        -subj "/CN=go-coff demo SecureBoot DB/"
+        -out sb.crt
+
+  sign-amd64:
+    desc: Sign BOOTX64.EFI with the demo SecureBoot key → BOOTX64-signed.EFI.
+    deps: [build-amd64, sb-keys]
+    sources: ["{{.AMD64_OUT}}", sb.key, sb.crt]
+    generates: [BOOTX64-signed.EFI]
+    cmds:
+      - >-
+        (cd {{.PECTL}} && go run . sign --key=$OLDPWD/sb.key --cert=$OLDPWD/sb.crt
+        -o $OLDPWD/BOOTX64-signed.EFI $OLDPWD/{{.AMD64_OUT}})
+      - file BOOTX64-signed.EFI
+
+  sign-arm64:
+    desc: Sign BOOTAA64.EFI with the demo SecureBoot key → BOOTAA64-signed.EFI.
+    deps: [build-arm64, sb-keys]
+    sources: ["{{.ARM64_OUT}}", sb.key, sb.crt]
+    generates: [BOOTAA64-signed.EFI]
+    cmds:
+      - >-
+        (cd {{.PECTL}} && go run . sign --key=$OLDPWD/sb.key --cert=$OLDPWD/sb.crt
+        -o $OLDPWD/BOOTAA64-signed.EFI $OLDPWD/{{.ARM64_OUT}})
+      - file BOOTAA64-signed.EFI
+
+  sign:
+    desc: Sign EFI binaries on both archs.
+    deps: [sign-amd64, sign-arm64]
 
   clean:
     desc: Remove all build artefacts.
     cmds:
       - rm -rf
-          main-x64.o thunk-x64.o {{.X64_OUT}} esp-x64 ovmf-x64-vars.fd qemu-x64.log
-          main-aa64.o thunk-aa64.o {{.AA64_OUT}} esp-aa64 ovmf-aa64-vars.fd qemu-aa64.log
-          esp.img stub.iso qemu-iso-x64.log qemu-iso-aa64.log
-          BOOTX64-uki.EFI BOOTAA64-uki.EFI esp-uki esp-uki-x64
-          qemu-uki-x64.log qemu-uki-aa64.log
-          BOOTX64-uki3a.EFI BOOTAA64-uki3a.EFI esp-uki3a-x64 esp-uki3a-aa64
-          qemu-uki3a-x64.log qemu-uki3a-aa64.log
+          main-amd64.o thunk-amd64.o {{.AMD64_OUT}} esp-amd64 ovmf-amd64-vars.fd qemu-amd64.log
+          main-arm64.o thunk-arm64.o {{.ARM64_OUT}} esp-arm64 ovmf-arm64-vars.fd qemu-arm64.log
+          esp.img stub.iso qemu-iso-amd64.log qemu-iso-arm64.log
+          BOOTX64-uki.EFI BOOTAA64-uki.EFI esp-uki-arm64 esp-uki-amd64
+          qemu-uki-amd64.log qemu-uki-arm64.log
+          BOOTX64-uki3a.EFI BOOTAA64-uki3a.EFI esp-uki3a-amd64 esp-uki3a-arm64
+          qemu-uki3a-amd64.log qemu-uki3a-arm64.log
+          BOOTX64-signed.EFI BOOTAA64-signed.EFI sb.key sb.crt
           .task
