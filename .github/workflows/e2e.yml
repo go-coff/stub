@@ -117,15 +117,17 @@ jobs:
                        -f "${{ matrix.initrd_dockerfile }}" \
                        -t go-coff-initrd:${{ matrix.arch }} .
 
-          docker create --platform "linux/${{ matrix.arch }}" \
-                        --name k go-coff-kernel:${{ matrix.arch }}
-          docker cp k:${{ matrix.kernel_in_container }} ./${{ matrix.kernel_artifact }}
-          docker rm k
+          # Extract the two artefacts. We capture the container ID rather
+          # than using a `--name` (newer Docker on the runner rejects the
+          # short, throw-away names `k`/`i` with "Invalid container name");
+          # an ID is always valid and collision-free.
+          kc=$(docker create --platform "linux/${{ matrix.arch }}" go-coff-kernel:${{ matrix.arch }})
+          docker cp "${kc}:${{ matrix.kernel_in_container }}" "./${{ matrix.kernel_artifact }}"
+          docker rm "${kc}"
 
-          docker create --platform "linux/${{ matrix.arch }}" \
-                        --name i go-coff-initrd:${{ matrix.arch }}
-          docker cp i:/initramfs.cpio.gz ./initramfs.cpio.gz
-          docker rm i
+          ic=$(docker create --platform "linux/${{ matrix.arch }}" go-coff-initrd:${{ matrix.arch }})
+          docker cp "${ic}:/initramfs.cpio.gz" ./initramfs.cpio.gz
+          docker rm "${ic}"
 
           ls -lh ${{ matrix.kernel_artifact }} initramfs.cpio.gz
 
