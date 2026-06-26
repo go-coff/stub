@@ -137,11 +137,14 @@ jobs:
 
       - name: Build pectl
         working-directory: pectl
-        run: go build -o "${GITHUB_WORKSPACE}/pectl" .
+        # NB: the pectl SOURCE is checked out at ${GITHUB_WORKSPACE}/pectl,
+        # so the binary must go somewhere else (pectl-bin) — building to
+        # ${GITHUB_WORKSPACE}/pectl would collide with that directory.
+        run: go build -o "${GITHUB_WORKSPACE}/pectl-bin" .
 
       - name: Assemble UKI = stub + .linux + .initrd + .cmdline
         run: |
-          "${GITHUB_WORKSPACE}/pectl" append \
+          "${GITHUB_WORKSPACE}/pectl-bin" append \
             --linux "${GITHUB_WORKSPACE}/kernel/${{ matrix.kernel_artifact }}" \
             --initrd "${GITHUB_WORKSPACE}/kernel/initramfs.cpio.gz" \
             --cmdline <(echo -n 'console=${{ matrix.console }}') \
