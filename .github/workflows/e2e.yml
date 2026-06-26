@@ -37,8 +37,6 @@ jobs:
             qemu: qemu-system-aarch64
             qemu_machine: virt
             qemu_cpu: max
-            ovmf_code: /usr/share/AAVMF/AAVMF_CODE.fd
-            ovmf_vars_template: /usr/share/AAVMF/AAVMF_VARS.fd
             console: ttyAMA0
             dockerfile: Dockerfile.arm64
             initrd_dockerfile: Dockerfile.initrd-arm64
@@ -51,8 +49,6 @@ jobs:
             qemu: qemu-system-x86_64
             qemu_machine: q35
             qemu_cpu: max
-            ovmf_code: /usr/share/OVMF/OVMF_CODE.fd
-            ovmf_vars_template: /usr/share/OVMF/OVMF_VARS.fd
             console: ttyS0
             dockerfile: Dockerfile.amd64
             initrd_dockerfile: Dockerfile.initrd-amd64
@@ -156,9 +152,54 @@ jobs:
           mkdir -p esp/EFI/BOOT
           cp "${GITHUB_WORKSPACE}/${{ matrix.uki_out }}" "esp/EFI/BOOT/${{ matrix.stub_out }}"
 
+      - name: Discover OVMF firmware (${{ matrix.arch }})
+        # Same portable lookup as Taskfile.yaml: modern Debian/Ubuntu ship
+        # the 4 MB split build (OVMF_CODE_4M.fd) sometimes INSTEAD of the
+        # legacy 2 MB OVMF_CODE.fd, so we probe both. Fail loudly if the
+        # firmware is genuinely absent — we never silently skip the boot.
+        run: |
+          set -eu
+          case "${{ matrix.arch }}" in
+            amd64)
+              code_candidates="
+                /usr/share/OVMF/OVMF_CODE_4M.fd
+                /usr/share/OVMF/OVMF_CODE.fd
+                /usr/share/qemu/OVMF.fd
+                /usr/share/edk2-ovmf/x64/OVMF_CODE.fd
+                /usr/share/edk2/x64/OVMF_CODE.fd"
+              vars_candidates="
+                /usr/share/OVMF/OVMF_VARS_4M.fd
+                /usr/share/OVMF/OVMF_VARS.fd
+                /usr/share/edk2-ovmf/x64/OVMF_VARS.fd
+                /usr/share/edk2/x64/OVMF_VARS.fd"
+              ;;
+            arm64)
+              code_candidates="
+                /usr/share/AAVMF/AAVMF_CODE.fd
+                /usr/share/qemu-efi-aarch64/QEMU_EFI.fd
+                /usr/share/edk2/aarch64/QEMU_EFI.fd"
+              vars_candidates="
+                /usr/share/AAVMF/AAVMF_VARS.fd
+                /usr/share/qemu-efi-aarch64/QEMU_VARS.fd
+                /usr/share/edk2/aarch64/QEMU_VARS.fd"
+              ;;
+          esac
+          pick() {
+            for p in $1; do
+              [ -f "$p" ] && { echo "$p"; return 0; }
+            done
+            return 1
+          }
+          code=$(pick "$code_candidates") || {
+            echo "::error::no OVMF/AAVMF CODE firmware found for ${{ matrix.arch }}"; exit 1; }
+          vars=$(pick "$vars_candidates") || {
+            echo "::error::no OVMF/AAVMF VARS template found for ${{ matrix.arch }}"; exit 1; }
+          echo "OVMF_CODE=$code"  | tee -a "$GITHUB_ENV"
+          echo "OVMF_VARS=$vars"  | tee -a "$GITHUB_ENV"
+
       - name: Boot UKI under QEMU + OVMF and capture serial log
         run: |
-          cp "${{ matrix.ovmf_vars_template }}" ovmf-vars.fd
+          cp "${OVMF_VARS}" ovmf-vars.fd
           rm -f e2e.log
           timeout 240 ${{ matrix.qemu }} \
             -machine ${{ matrix.qemu_machine }} \
@@ -167,7 +208,7 @@ jobs:
             -display none \
             -no-reboot \
             -serial file:e2e.log \
-            -drive if=pflash,format=raw,readonly=on,file=${{ matrix.ovmf_code }} \
+            -drive if=pflash,format=raw,readonly=on,file="${OVMF_CODE}" \
             -drive if=pflash,format=raw,file=ovmf-vars.fd \
             ${{ matrix.qemu_drive }} \
             -net none || true
@@ -177,7 +218,7 @@ jobs:
         run: grep -q 'GOCOFF-INITRD-OK' e2e.log
 
       - name: Assert kernel powered down cleanly
-        run: grep -q 'reboot: Power down' e2e.log
+        run: "grep -q 'reboot: Power down' e2e.log"
 
       - name: Upload UKI + log on failure
         if: failure()
