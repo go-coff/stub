@@ -36,7 +36,11 @@ jobs:
           - arch: arm64
             qemu: qemu-system-aarch64
             qemu_machine: virt
-            qemu_cpu: max
+            # NOT -cpu max: it trips a QEMU aarch64 assertion
+            # (target/arm/internals.h: regime_is_user "code should not be reached")
+            # that core-dumps the emulator mid-UEFI-boot. cortex-a72 is the
+            # canonical -machine virt CPU and boots the UKI cleanly.
+            qemu_cpu: cortex-a72
             console: ttyAMA0
             dockerfile: Dockerfile.arm64
             initrd_dockerfile: Dockerfile.initrd-arm64
