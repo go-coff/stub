@@ -7,8 +7,8 @@
 A UEFI Unified Kernel Image stub written in **TinyGo** + a thin asm
 shim. The goal is to remove `systemd` as a build-time dependency for
 anyone assembling a UKI: pair this stub with
-[`go-coff/pe`](https://github.com/go-coff/pe) /
-[`go-coff/pec`](https://github.com/go-coff/pec) and the whole pipeline
+[`go-coff/peln`](https://github.com/go-coff/peln) /
+[`go-coff/pectl`](https://github.com/go-coff/pectl) and the whole pipeline
 runs without `binutils` and without `systemd-stub`.
 
 > **Status:** phase 3 (basic) — boots under OVMF on x86_64 and aarch64,
@@ -43,6 +43,13 @@ task build-arm64       # same pipeline for arm64 → BOOTAA64.EFI
 task qemu-arm64
 task qemu-test-arm64
 
+# riscv64 and loongarch64 share the same per-arch chain
+# (build-/qemu-/qemu-test-riscv64 and -loongarch64), linking via
+# go-coff/peln. Each needs its external TinyGo runtime shim applied
+# first — see the header comments in Taskfile.yaml.
+task build-riscv64     # → BOOTRISCV64.EFI
+task build-loongarch64 # → BOOTLOONGARCH64.EFI
+
 # Aggregates that fan out over both architectures.
 task build           # build-amd64 + build-arm64
 task qemu-test       # qemu-test-amd64 + qemu-test-arm64
@@ -56,7 +63,7 @@ task qemu-iso-test   # qemu-iso-test-amd64 + qemu-iso-test-arm64
 # Phase-3 self-load smoke test (appends BOOT*.EFI as its own .linux,
 # then boots the result; the outer chain-loads the inner via LoadImage
 # / StartImage and the inner reports "no .linux, skipping"). Requires
-# a sibling checkout of github.com/go-coff/pec at ../pec.
+# a sibling checkout of github.com/go-coff/pectl at ../pectl.
 task uki-amd64         # → BOOTX64-uki.EFI
 task uki-arm64        # → BOOTAA64-uki.EFI
 task uki-test-amd64    # boot BOOTX64-uki.EFI, assert banner appears 2×
@@ -248,15 +255,20 @@ PC=0 inside DxeCore.
 
 ```text
 stub/
-├── main.go                EFI structs (uintptr method slots) + _start + banner
-├── thunk-amd64.S            MS x64 thunks: efiCall1..5 (RCX/RDX/R8/R9 shuffle)
-├── thunk-arm64.S           AAPCS64 thunks: efiCall1..5 (X0..X5 shuffle)
+├── main.go                    EFI structs (uintptr method slots) + _start + banner
+├── thunk-amd64.S              MS x64 thunks: efiCall1..5 (RCX/RDX/R8/R9 shuffle)
+├── thunk-arm64.S              AAPCS64 thunks: efiCall1..5 (X0..X5 shuffle)
+├── thunk-riscv64.S            RV64 (LP64D) thunks: a0..a7 shuffle
+├── thunk-loongarch64.S        LP64D thunks mirroring the RV64 ones
 ├── targets/
-│   ├── uefi-amd64.json      TinyGo target: x86_64-pc-windows-gnu + freestanding
-│   └── uefi-arm64.json     TinyGo target: aarch64-pc-windows-gnu + freestanding
+│   ├── uefi-amd64.json        TinyGo target: x86_64-pc-windows-gnu + freestanding
+│   ├── uefi-arm64.json        TinyGo target: aarch64-pc-windows-gnu + freestanding
+│   ├── uefi-riscv64.json      TinyGo target: riscv64-pc-windows-gnu + freestanding
+│   └── uefi-loongarch64.json  TinyGo target: loongarch64-pc-windows-gnu + freestanding
 ├── cmd/
-│   ├── mkesp/             FAT16 ESP writer; replaces mtools at build time
-│   └── mkiso/             ISO 9660 + El Torito UEFI writer; replaces xorriso
+│   ├── mkesp/                 FAT16 ESP writer; replaces mtools at build time
+│   ├── mkiso/                 ISO 9660 + El Torito UEFI writer; replaces xorriso
+│   └── mkuki/                 appends fixed test sections to a linked stub (phase-3 self-load)
 ├── Taskfile.yaml          per-arch: thunk → compile → link → esp → qemu / qemu-test
 │                          + multi-arch: esp-img → iso → qemu-iso-test
 ├── go.mod
@@ -275,7 +287,7 @@ stub/
 - **Phase 2** ✅ — locate our own PE image at runtime via
   `EFI_LOADED_IMAGE_PROTOCOL` (the firmware tells us where it loaded
   us), walk the COFF header and print every section's name, VA and
-  size. Any payload a `pec append --section` build-time pass injects
+  size. Any payload a `pectl append --section` build-time pass injects
   shows up here verbatim. Works on both archs.
 - **Phase 3 (basic)** ✅ — if a `.linux` section is present, chain-load
   it via `BootServices.LoadImage` + `StartImage`. On aarch64 this is
@@ -293,9 +305,14 @@ stub/
   Forward `.cmdline` to the child by writing it into
   `EFI_LOADED_IMAGE.LoadOptions` on the handle returned by
   `LoadImage`.
-- **riscv64** — duplicate the recipe one more time with the
-  `riscv64-pc-windows-gnu` triple and a thunk in the RISC-V ABI
-  (`a0..a7` arg registers, `ra` link register).
+- **riscv64 / loongarch64** — the asm thunk (`thunk-riscv64.S` /
+  `thunk-loongarch64.S`), the TinyGo target (`targets/uefi-riscv64.json` /
+  `uefi-loongarch64.json`) and the full `build-`/`qemu-`/`qemu-test-`
+  task chain are in place, linking via `go-coff/peln` (lld-link has no
+  `/machine:riscv64` or `/machine:loongarch64`). Each still needs its
+  external TinyGo runtime shim applied first
+  (`cloud-boot/tinygo-riscv64-uefi` / `tinygo-loongarch64-uefi`) and is
+  not yet OVMF-boot-verified.
 
 ## License
 
