@@ -139,7 +139,7 @@ func TestWriteLFNEntries_RoundTrip(t *testing.T) {
 	}
 	// Long name has 15 chars; chars 14..15 (0-indexed 13..14) are 'F', 'I'.
 	if e0.chars[0] != 'F' || e0.chars[1] != 'I' {
-		t.Errorf("entry 0 chars[0..1] = %q,%q, want 'F','I'", e0.chars[0], e0.chars[1])
+		t.Errorf("entry 0 chars[0..1] = %q,%q, want 'F','I'", rune(e0.chars[0]), rune(e0.chars[1]))
 	}
 	// Position right after the name end (index 15 → 0-indexed 15, which is
 	// LFN slot index 2 in this segment) should be the 0x0000 NUL terminator.
