@@ -112,7 +112,7 @@ jobs:
       - name: Set up QEMU (cross-platform docker)
         # Needed so amd64 runners can build arm64 docker images for the
         # kernel container (qemu-user emulation).
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
 
       - name: Build kernel + initramfs (${{ matrix.arch }})
         working-directory: kernel
