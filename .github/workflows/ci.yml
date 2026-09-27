@@ -37,6 +37,31 @@ jobs:
           curl -fsSL -o /tmp/tinygo.deb "$url"
           sudo dpkg -i /tmp/tinygo.deb
 
+      # ⛔ This repository has a Go package with six tests and, until now, no
+      # workflow that ran them. `go test` appears nowhere in the CI and
+      # nowhere in the Taskfile either -- the Taskfile only `go run`s
+      # cmd/mkesp to build the ESP image. The tests pass; nobody had asked.
+      #
+      # ⛔ -unsafeptr=false, deliberately and narrowly. vet objects to
+      #
+      #     func peU16(base, off uintptr) uint16 {
+      #         return *(*uint16)(unsafe.Pointer(base + off))
+      #     }
+      #
+      # and it is right in general: arithmetic on a uintptr then converting
+      # back is unsound when the address belongs to Go. Here `base` is a PE
+      # image base handed over by firmware, which no Go allocator owns and no
+      # stack copy can move, so the objection does not apply. Turning the ONE
+      # check off with the reason written down beats the status quo, which was
+      # never running vet at all.
+      #
+      # -count=1 because installing or building a tool does not invalidate the
+      # Go test cache, and a cached result is not a run.
+      - name: Go vet and test
+        run: |
+          go vet -unsafeptr=false ./...
+          go test -count=1 ./...
+
       - name: Build the EFI binary (${{ matrix.arch }})
         run: task build-${{ matrix.arch }}
 

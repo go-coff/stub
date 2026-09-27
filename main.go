@@ -423,7 +423,6 @@ func peU16(base, off uintptr) uint16 {
 	return *(*uint16)(unsafe.Pointer(base + off))
 }
 
-// peU32 reads a little-endian uint32 at `base+off`.
 // peByte reads a single byte at `base+off`. Used to walk the body of an
 // ASCII UKI section without a slice (no allocation on a freestanding
 // build) and without bounds-checking overhead.
@@ -454,6 +453,7 @@ func secNameIs(entry uintptr, target string) bool {
 	return true
 }
 
+// peU32 reads a little-endian uint32 at `base+off`.
 func peU32(base, off uintptr) uint32 {
 	return *(*uint32)(unsafe.Pointer(base + off))
 }
