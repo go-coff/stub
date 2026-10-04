@@ -24,9 +24,9 @@ func TestEFIShortName(t *testing.T) {
 		{"BOOTRISCV64.EFI", "BOOTRV64EFI", "BOOTRISCV64.EFI", false},
 		{"BOOTLOONGARCH64.EFI", "BOOTLA64EFI", "BOOTLOONGARCH64.EFI", false},
 		// Error cases.
-		{"foo.bin", "", "", true},           // not .EFI
-		{"BOOTLONGNAME.EFI", "", "", true},  // long stem with no alias
-		{"BOOT X64.EFI", "", "", true},      // space in basename
+		{"foo.bin", "", "", true},          // not .EFI
+		{"BOOTLONGNAME.EFI", "", "", true}, // long stem with no alias
+		{"BOOT X64.EFI", "", "", true},     // space in basename
 	}
 	for _, c := range cases {
 		t.Run(c.in, func(t *testing.T) {
@@ -176,9 +176,9 @@ func TestEntry_DirEntriesCost(t *testing.T) {
 		short, long string
 		want        int
 	}{
-		{"BOOTX64 EFI", "", 1},                          // 8.3-compatible
-		{"BOOTRV64EFI", "BOOTRISCV64.EFI", 1 + 2},       // 15-char LFN → 2 segs
-		{"BOOTLA64EFI", "BOOTLOONGARCH64.EFI", 1 + 2},   // 19-char LFN → 2 segs
+		{"BOOTX64 EFI", "", 1},                        // 8.3-compatible
+		{"BOOTRV64EFI", "BOOTRISCV64.EFI", 1 + 2},     // 15-char LFN → 2 segs
+		{"BOOTLA64EFI", "BOOTLOONGARCH64.EFI", 1 + 2}, // 19-char LFN → 2 segs
 	}
 	for _, c := range cases {
 		e := &entry{full11: c.short, longName: c.long}

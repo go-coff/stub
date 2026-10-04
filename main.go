@@ -2,9 +2,11 @@
 //
 // Phase 1 — print a banner via SimpleTextOutput.
 // Phase 2 — locate our own PE image at runtime via EFI_LOADED_IMAGE_PROTOCOL
-//          and walk the embedded section table. This is the runtime equivalent
-//          of what `pe.Append` does at build time: it gives the stub a way to
-//          read its own `.linux` / `.initrd` / `.cmdline` / `.osrel` payloads.
+//
+//	and walk the embedded section table. This is the runtime equivalent
+//	of what `pe.Append` does at build time: it gives the stub a way to
+//	read its own `.linux` / `.initrd` / `.cmdline` / `.osrel` payloads.
+//
 // Phase 3 — kernel handoff via the EFI handover protocol (TODO).
 //
 // All EFI method slots are declared as `uintptr` so the Go struct layout
@@ -809,11 +811,11 @@ func _start(imageHandle uintptr, st *efiSystemTable) efiStatus {
 	dbg(co, "\r\n")
 
 	status = efiCall6(bs.loadImage,
-		0,                                    // BootPolicy = FALSE: the SourceBuffer holds the image
-		imageHandle,                          // ParentImageHandle
-		0,                                    // DevicePath = NULL
-		lip.imageBase+uintptr(dotLinuxVA),    // SourceBuffer
-		uintptr(dotLinuxSize),                // SourceSize
+		0,                                 // BootPolicy = FALSE: the SourceBuffer holds the image
+		imageHandle,                       // ParentImageHandle
+		0,                                 // DevicePath = NULL
+		lip.imageBase+uintptr(dotLinuxVA), // SourceBuffer
+		uintptr(dotLinuxSize),             // SourceSize
 		uintptr(unsafe.Pointer(&childImageHandle)),
 	)
 	if status != efiSuccess {

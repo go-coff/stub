@@ -4,14 +4,14 @@
 //
 // Pipeline:
 //
-//   workspace/
-//   ├── EFI/BOOT/BOOTX64.EFI         visible to any tool that mounts the ISO
-//   ├── EFI/BOOT/BOOTAA64.EFI        "
-//   ├── EFI/BOOT/BOOTRISCV64.EFI     "
-//   ├── EFI/BOOT/BOOTLOONGARCH64.EFI "
-//   └── boot/efi.img                 the FAT16 ESP; El Torito UEFI boot
-//                                    record points here, so firmware reading
-//                                    the CD uses this file as the boot volume.
+//	workspace/
+//	├── EFI/BOOT/BOOTX64.EFI         visible to any tool that mounts the ISO
+//	├── EFI/BOOT/BOOTAA64.EFI        "
+//	├── EFI/BOOT/BOOTRISCV64.EFI     "
+//	├── EFI/BOOT/BOOTLOONGARCH64.EFI "
+//	└── boot/efi.img                 the FAT16 ESP; El Torito UEFI boot
+//	                                 record points here, so firmware reading
+//	                                 the CD uses this file as the boot volume.
 //
 // All inputs are passed in on the command line; we stage them in a
 // temp workspace and hand it to github.com/diskfs/go-diskfs to render
